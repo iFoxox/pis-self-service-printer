@@ -76,6 +76,31 @@ fn sign_body(body: &mut Map<String, Value>, secret_key: &str) -> Result<String, 
     Ok(STANDARD.encode(signature))
 }
 
+/// 缓存的 HTTP 客户端（超时秒数 + Client）：复用连接池避免每次请求重建
+/// （重建会丢掉 keep-alive 连接，每次都重新 TCP/TLS 握手）。
+/// 配置超时仅经设置页修改（1–5 秒），变更频率极低，按值比对、不同则重建。
+static HTTP_CLIENT: std::sync::Mutex<Option<(u64, reqwest::Client)>> = std::sync::Mutex::new(None);
+
+fn http_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
+    let mut guard = HTTP_CLIENT
+        .lock()
+        .map_err(|_| "网络初始化失败，请联系工作人员！".to_string())?;
+    if let Some((secs, client)) = guard.as_ref() {
+        if *secs == timeout_secs {
+            return Ok(client.clone()); // Client 内部为 Arc，克隆零成本
+        }
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|e| {
+            log::error("pis-api", &format!("HTTP 客户端初始化失败: {e}"));
+            "网络初始化失败，请联系工作人员！".to_string()
+        })?;
+    *guard = Some((timeout_secs, client.clone()));
+    Ok(client)
+}
+
 /// 发起签名 POST 请求并解析统一响应
 /// 返回的错误为面向患者的友好提示（技术细节只写入日志）
 pub(crate) async fn post<T: DeserializeOwned + Default>(
@@ -101,13 +126,7 @@ pub(crate) async fn post<T: DeserializeOwned + Default>(
         pathname
     );
     let timeout_secs = u64::from(config.service.request_timeout_seconds.min(5));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .build()
-        .map_err(|e| {
-            log::error("pis-api", &format!("HTTP 客户端初始化失败: {e}"));
-            "网络初始化失败，请联系工作人员！".to_string()
-        })?;
+    let client = http_client(timeout_secs)?;
 
     let response = client
         .post(url)

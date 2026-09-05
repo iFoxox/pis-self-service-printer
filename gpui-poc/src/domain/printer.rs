@@ -1,6 +1,6 @@
 //! 打印机枚举与系统打印（平移自 src-tauri/src/printer.rs，移除 Tauri IPC）
 //!
-//! Windows 平台的子进程调用统一走 super::syscmd::silent（避免弹出控制台黑框），
+//! Windows 平台走 winspool 原生 API（EnumPrintersW / GetDefaultPrinterW）；
 //! lpstat / lp 仅用于 macOS/Linux。
 
 // Windows 下 lpstat / lp 调用被条件编译排除
@@ -200,63 +200,110 @@ mod tests {
 
 #[cfg(target_os = "windows")]
 fn list_printers_windows() -> Result<Vec<PrinterInfo>, String> {
-    let script = r#"Get-Printer | Select-Object Name,@{n='Default';e={(Get-CimInstance Win32_Printer -Filter "Name='$($_.Name)'").Default}},PrinterStatus | ConvertTo-Json -Compress"#;
-    let output = super::syscmd::silent("powershell")
-        .args(["-NoProfile", "-Command", script])
-        .output()
-        .map_err(|e| format!("调用 PowerShell 失败: {e}"))?;
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return Ok(Vec::new());
-    }
-    let value: serde_json::Value =
-        serde_json::from_str(trimmed).map_err(|e| format!("解析打印机列表失败: {e}"))?;
-    let arr = match value {
-        serde_json::Value::Array(a) => a,
-        serde_json::Value::Object(_) => vec![value],
-        _ => return Ok(Vec::new()),
+    use windows::Win32::Graphics::Printing::{
+        EnumPrintersW, PRINTER_ATTRIBUTE_DEFAULT, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL,
+        PRINTER_INFO_2W, PRINTER_STATUS_ERROR, PRINTER_STATUS_NOT_AVAILABLE, PRINTER_STATUS_OFFLINE,
+        PRINTER_STATUS_PRINTING,
     };
-    Ok(arr
-        .into_iter()
-        .map(|v| PrinterInfo {
-            name: v
-                .get("Name")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-            display_name: v
-                .get("Name")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-            is_default: v.get("Default").and_then(|x| x.as_bool()).unwrap_or(false),
-            status: v
-                .get("PrinterStatus")
-                .map(|x| x.to_string())
-                .unwrap_or_default(),
-        })
-        .filter(|p| !p.name.is_empty())
-        .collect())
+
+    // 原生 winspool 枚举（毫秒级）：旧实现走 PowerShell + N+1 CIM 查询需 1~3 秒
+    unsafe {
+        let flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
+        let mut needed = 0u32;
+        let mut count = 0u32;
+        // 第一次调用仅探测所需缓冲区大小（必然"失败"并回填 needed）
+        let _ = EnumPrintersW(flags, None, 2, None, &mut needed, &mut count);
+        if needed == 0 {
+            return Ok(Vec::new());
+        }
+        let mut buffer = vec![0u8; needed as usize];
+        EnumPrintersW(
+            flags,
+            None,
+            2,
+            Some(buffer.as_mut_slice()),
+            &mut needed,
+            &mut count,
+        )
+        .map_err(|e| format!("枚举打印机失败: {e}"))?;
+
+        let base = buffer.as_ptr() as *const PRINTER_INFO_2W;
+        let mut printers = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let info = &*base.add(i as usize);
+            let name = wide_string(info.pPrinterName);
+            if name.is_empty() {
+                continue;
+            }
+            let is_default = (info.Attributes & PRINTER_ATTRIBUTE_DEFAULT) != 0;
+            printers.push(PrinterInfo {
+                name: name.clone(),
+                display_name: name,
+                is_default,
+                status: describe_status(
+                    info.Status,
+                    &[
+                        (PRINTER_STATUS_PRINTING, "打印中"),
+                        (PRINTER_STATUS_OFFLINE, "脱机"),
+                        (PRINTER_STATUS_ERROR, "错误"),
+                        (PRINTER_STATUS_NOT_AVAILABLE, "不可用"),
+                    ],
+                ),
+            });
+        }
+        Ok(printers)
+    }
+}
+
+/// 读取 PRINTER_INFO_2W 的 UTF-16 字符串成员（PWSTR）
+#[cfg(target_os = "windows")]
+fn wide_string(ptr: windows::core::PWSTR) -> String {
+    unsafe {
+        let mut len = 0usize;
+        while *ptr.0.add(len) != 0 {
+            len += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(ptr.0, len))
+    }
+}
+
+/// 把 winspool 状态标志位翻译为简短中文（置位的第一个命中项，无标志 = 就绪）
+#[cfg(target_os = "windows")]
+fn describe_status(status: u32, mapping: &[(u32, &'static str)]) -> String {
+    for (flag, label) in mapping {
+        if status & *flag != 0 {
+            return label.to_string();
+        }
+    }
+    "就绪".to_string()
 }
 
 /// 系统默认打印机名（失败或不存在时返回空字符串）
 pub fn default_printer_name() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
-        let script = r#"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; (Get-CimInstance -ClassName Win32_Printer -Filter "Default=TRUE").Name"#;
-        let output = super::syscmd::silent("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
-            .output()
-            .map_err(|e| format!("调用 PowerShell 失败: {e}"))?;
-        let name = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        Ok(name)
+        use windows::core::PWSTR;
+        use windows::Win32::Foundation::GetLastError;
+        use windows::Win32::Graphics::Printing::GetDefaultPrinterW;
+        unsafe {
+            let mut needed = 0u32;
+            // 第一次调用仅探测缓冲区大小（缓冲区不足返回 false 并回填 needed）
+            let _ = GetDefaultPrinterW(None, &mut needed);
+            if needed == 0 {
+                return Ok(String::new());
+            }
+            let mut buffer = vec![0u16; needed as usize];
+            let mut written = 0u32;
+            if !GetDefaultPrinterW(Some(PWSTR(buffer.as_mut_ptr())), &mut written).as_bool() {
+                crate::domain::log::warn(
+                    "printer",
+                    &format!("读取默认打印机失败（GetLastError={:?}）", GetLastError()),
+                );
+                return Ok(String::new());
+            }
+            let len = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+            Ok(String::from_utf16_lossy(&buffer[..len]))
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -272,6 +319,36 @@ pub fn default_printer_name() -> Result<String, String> {
 /// 用户在系统打印对话框 / 假脱机程序取消打印的标记错误。
 /// UI 层据此静默返回报告页并重新计时，而不是弹出错误。
 pub const PRINT_CANCELLED_ERR: &str = "__print_cancelled__";
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests {
+    use super::*;
+
+    /// 原生 winspool 枚举可用：至少枚举到一台打印机（本机必有 Microsoft Print to PDF）
+    #[test]
+    fn native_enumeration_lists_printers() {
+        let printers = list_printers().expect("枚举打印机失败");
+        assert!(!printers.is_empty(), "应至少枚举到一台打印机");
+        assert!(
+            printers.iter().all(|p| !p.name.is_empty()),
+            "打印机名不应为空"
+        );
+    }
+
+    /// 默认打印机与枚举结果一致（存在默认打印机时）
+    #[test]
+    fn default_printer_matches_enumeration() {
+        let default = default_printer_name().unwrap_or_default();
+        if default.is_empty() {
+            return; // 无默认打印机（如全新系统），跳过
+        }
+        let printers = list_printers().expect("枚举打印机失败");
+        assert!(
+            printers.iter().any(|p| p.name == default),
+            "枚举结果应包含默认打印机 {default}"
+        );
+    }
+}
 
 /// 打印一个文件（PDF）到指定打印机
 /// - macOS / Linux：`lp`，支持 media 与 orientation-requested

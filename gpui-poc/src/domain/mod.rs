@@ -13,7 +13,6 @@ pub mod printer;
 #[cfg(target_os = "windows")]
 pub mod printer_win;
 pub mod report;
-pub mod syscmd;
 
 use config::AppConfig;
 

@@ -192,6 +192,42 @@ pub fn auto_hide_system_bars() {
 #[cfg(not(target_os = "macos"))]
 pub fn auto_hide_system_bars() {}
 
+/// 单实例保护：进程级互斥量，进程退出时由系统自动释放
+///
+/// 返回 true = 获得实例权（可继续启动）；false = 已有实例在运行，应立即退出。
+/// 互斥量创建失败时放行启动（降级为旧行为，不因保护机制本身阻断终端）。
+#[cfg(target_os = "windows")]
+pub fn acquire_single_instance() -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+    use windows::Win32::System::Threading::CreateMutexW;
+
+    const MUTEX_NAME: &str = "PisSelfServicePrinterSingleInstance";
+
+    unsafe {
+        let name: Vec<u16> = MUTEX_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+        let _handle = match CreateMutexW(None, false, PCWSTR(name.as_ptr())) {
+            Ok(handle) => handle,
+            Err(e) => {
+                crate::domain::log::warn("main", &format!("单实例互斥量创建失败（{e}），跳过保护继续启动"));
+                return true;
+            }
+        };
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            return false;
+        }
+        // HANDLE 是 Copy 且无 Drop：只要进程存活期间不调用 CloseHandle，
+        // 互斥量内核对象就保持占用，进程退出时由系统统一回收
+        true
+    }
+}
+
+/// 非 Windows 平台不做单实例保护（kiosk 目标平台为 Windows）
+#[cfg(not(target_os = "windows"))]
+pub fn acquire_single_instance() -> bool {
+    true
+}
+
 /// `cargo run` 启动的是裸可执行文件，没有 `.app` bundle / Info.plist 图标。
 /// macOS 开发环境需要在 AppKit 里显式设置运行时图标，Dock 才不会显示默认图形。
 #[cfg(target_os = "macos")]

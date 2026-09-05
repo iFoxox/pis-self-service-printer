@@ -20,6 +20,31 @@ mod widgets;
 use state::KioskState;
 
 fn main() {
+    // panic 钩子最先安装：release 为 panic=abort，不挂钩子则 panic 时
+    // 进程静默消失、现场无任何线索；钩子在 abort 前把信息写入文件日志
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_default();
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "非字符串 panic 载荷".to_string()
+        };
+        crate::domain::log::error("panic", &format!("{location} {payload}"));
+    }));
+
+    // 单实例保护：终端机上重复启动会叠出第二个全屏窗口，直接退出新进程
+    #[cfg(target_os = "windows")]
+    if !native_window::acquire_single_instance() {
+        // 日志模块此时可用（写默认目录），仅提示一次便于现场排查
+        crate::domain::log::warn("main", "检测到应用已在运行，本次启动退出");
+        return;
+    }
+
     Application::new()
         .with_assets(icons::Assets)
         .run(|cx: &mut App| {
