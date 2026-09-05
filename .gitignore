@@ -1,0 +1,20 @@
+# GPUI 构建产物
+gpui-poc/target/
+gpui-poc/dist/
+
+# 本地开发配置：含真实 PIS 接口密钥，禁止入库
+# 新环境请复制 resources/config/app-config.json 后填写本地参数
+resources/config/app-config-dev.json
+
+# 日志
+*.log
+
+# IDE
+.vscode/
+.DS_Store
+
+# CodeBuddy 会话数据
+.codebuddy/
+
+# UI 评审截图（临时产物）
+gpui-poc/shots/

@@ -1,0 +1,63 @@
+[package]
+name = "pisSelfServicePrinter"
+version = "0.1.0"
+edition = "2024"
+description = "PIS 病理报告自助打印终端（GPUI 桌面端）"
+
+[dependencies]
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+anyhow = "1"
+pdfium-render = { version = "0.9.3", default-features = false, features = [
+    "pdfium_latest",
+    "thread_safe",
+] }
+
+# 领域层依赖（config/pis/printer/report/log 实现所需）
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+chrono = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+hmac = "0.12"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+# 按键音效与语音播报（click-sound.ts / voice.ts 对应实现）
+rodio = { version = "0.20", default-features = false, features = ["mp3", "wav"] }
+gpui-component = "0.5.1"
+gpui-component-assets = "0.5.1"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Data_Pdf",
+    "Foundation",
+    "Graphics_Imaging",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Printing",
+    "Win32_Storage_Xps",
+
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-future = "0.2"
+
+# macOS kiosk：应用激活期间自动隐藏 Dock 与菜单栏（与 gpui 内部同版本）
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSImage"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData"] }
+
+# 构建期嵌入应用图标（任务栏/窗口/exe 图标，gpui 从资源 ID=1 加载）
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

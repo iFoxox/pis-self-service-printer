@@ -1,0 +1,42 @@
+{
+  "configVersion": 1,
+  "hospitalName": "病理报告自助服务",
+  "hospitalLogo": "",
+  "hospitalLogoPreset": "",
+  "footerLogo": "",
+  "footerLogoPreset": "",
+  "terminalCode": "PIS-KIOSK-001",
+  "service": {
+    "baseUrl": "http://127.0.0.1:8080",
+    "orgId": "",
+    "apiKey": "",
+    "secretKey": "",
+    "requestTimeoutSeconds": 5
+  },
+  "print": {
+    "defaultPrinter": "",
+    "paper": "A4",
+    "orientation": "portrait",
+    "allowReprint": false
+  },
+  "terminal": {
+    "fullscreen": true,
+    "idleTimeoutSeconds": 60,
+    "exitPassword": "",
+    "minimizePassword": "",
+    "logPassword": "",
+    "reportNotice": "只能查询到180天以内的报告，超出时间请到窗口询问工作人员",
+    "inputHint": "输入登记号/病历号",
+    "logRetentionDays": 30,
+    "logDir": "",
+    "autoSelectReports": false,
+    "voiceEnabled": true,
+    "voiceVolume": 80,
+    "voiceRate": 0.9,
+    "clickEnabled": true,
+    "clickVolume": 70,
+    "voiceInput": "",
+    "voiceReportsFound": "",
+    "voicePrintComplete": ""
+  }
+}

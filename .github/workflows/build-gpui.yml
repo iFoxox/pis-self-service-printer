@@ -1,0 +1,174 @@
+name: Build GPUI (pisSelfServicePrinter)
+
+# 构建病理报告自助打印终端的 GPUI 版本（Windows Kiosk 目标）
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "gpui-poc/**"
+      - ".github/workflows/build-gpui.yml"
+    tags:
+      - "gpui-*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # 打 tag 时用于创建 Release 上传产物
+
+jobs:
+  build-windows:
+    name: Build (windows x64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust (stable, MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Cargo.toml 为 edition 2024，需要 Rust >= 1.85（stable 已满足）
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gpui-poc
+          # 依赖较少变动，key 失效主要随 Cargo.lock
+          cache-all-crates: true
+
+      - name: Check formatting (non-blocking)
+        run: cargo fmt --manifest-path gpui-poc/Cargo.toml -- --check
+        continue-on-error: true
+
+      - name: Build release
+        run: cargo build --release --manifest-path gpui-poc/Cargo.toml
+
+      - name: Smoke test binary exists
+        run: |
+          $exe = "gpui-poc/target/release/pisSelfServicePrinter.exe"
+          if (-not (Test-Path $exe)) { throw "构建产物缺失: $exe" }
+          (Get-Item $exe).Length
+
+      # ==== 代码签名（可选）====
+      # 需在仓库 Secrets 配置：
+      #   WINDOWS_SIGNING_PFX      —— PFX 证书文件的 Base64（见下方生成说明）
+      #   WINDOWS_SIGNING_PASSWORD —— 导出 PFX 时设置的密码
+      # 未配置时跳过签名，构建产物不签名正常发布。
+      # 证书生成（本地执行一次）：
+      #   $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=机构名称" `
+      #             -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddYears(10)
+      #   Export-PfxCertificate -Cert $cert -FilePath app-signing.pfx `
+      #             -Password (ConvertTo-SecureString "密码" -Force -AsPlainText)
+      #   [Convert]::ToBase64String([IO.File]::ReadAllBytes("app-signing.pfx")) | Set-Content pfx-base64.txt
+      # 终端机信任（域环境走组策略，单机手动执行）：
+      #   Import-Certificate -FilePath app-signing.cer -CertStoreLocation Cert:\LocalMachine\Root
+      - name: Decode signing certificate
+        id: signing
+        env:
+          SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX }}
+        if: env.SIGNING_PFX != ''
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_PFX.Trim()))
+          "PFX=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Sign application exe
+        env:
+          SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+        if: env.PFX != ''
+        run: |
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signtool) { throw "未找到 signtool.exe" }
+          & $signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
+            /f $env:PFX /p $env:SIGNING_PASSWORD "gpui-poc/target/release/pisSelfServicePrinter.exe"
+          if ($LASTEXITCODE -ne 0) { throw "exe 签名失败" }
+          & $signtool verify /pa /all "gpui-poc/target/release/pisSelfServicePrinter.exe"
+
+      - name: Download PDFium (Windows x64)
+        run: |
+          $url = "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7881/pdfium-win-x64.tgz"
+          $archive = Join-Path $env:RUNNER_TEMP "pdfium-win-x64.tgz"
+          $extractDir = Join-Path $env:RUNNER_TEMP "pdfium-win-x64"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+          tar -xzf $archive -C $extractDir
+          $dll = Join-Path $extractDir "bin/pdfium.dll"
+          if (-not (Test-Path $dll)) { throw "PDFium 产物缺失: $dll" }
+          Copy-Item $dll "gpui-poc/target/release/pdfium.dll" -Force
+
+      - name: Package (exe + bundled config)
+        run: |
+          $stage = "gpui-poc/dist"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "gpui-poc/target/release/pisSelfServicePrinter.exe" $stage
+          Copy-Item "gpui-poc/target/release/pdfium.dll" $stage
+          # 打包内置配置模板（config/ 随包分发，路径解析见 src/paths.rs resource_dir）
+          if (Test-Path "resources/config") {
+            Copy-Item -Recurse -Force "resources/config" "$stage/config"
+          }
+          $version = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0,7))" }
+          $zip = "gpui-poc-kiosk-$version-windows-x64.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath $zip -Force
+          "ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build installer (Inno Setup)
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $iscc)) { throw "未找到 ISCC.exe（Inno Setup 6）" }
+          # 版本号：tag 构建取 tag 名（去掉 gpui- 前缀），分支构建取 dev-<sha>
+          $version = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME -replace '^gpui-', '' } else { "dev-$($env:GITHUB_SHA.Substring(0,7))" }
+          & $iscc "/DMyAppVersion=$version" "gpui-poc/packaging/setup.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC 打包失败" }
+
+      - name: Locate installer
+        run: |
+          $setup = Get-ChildItem "gpui-poc/target/release/dist" -Filter "PISReportKiosk-*-setup.exe" | Select-Object -First 1
+          if (-not $setup) { throw "安装包缺失" }
+          "SETUP=$($setup.Name)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SETUP_PATH=$($setup.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Sign installer
+        env:
+          SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+        if: env.PFX != ''
+        run: |
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1 -ExpandProperty FullName
+          & $signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
+            /f $env:PFX /p $env:SIGNING_PASSWORD "$env:SETUP_PATH"
+          if ($LASTEXITCODE -ne 0) { throw "安装包签名失败" }
+          & $signtool verify /pa /all "$env:SETUP_PATH"
+
+      - name: Cleanup signing certificate
+        if: always() && env.PFX != ''
+        run: Remove-Item $env:PFX -Force -ErrorAction SilentlyContinue
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ env.ZIP }}
+          path: ${{ env.ZIP }}
+          if-no-files-found: error
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ env.SETUP }}
+          path: ${{ env.SETUP_PATH }}
+          if-no-files-found: error
+
+      - name: Attach to release (on tag)
+        if: startsWith(github.ref, 'refs/tags/gpui-')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            ${{ env.ZIP }}
+            ${{ env.SETUP_PATH }}
+          overwrite: true # 同名资产覆盖（重打标签时替换旧产物）
+          generate_release_notes: true
