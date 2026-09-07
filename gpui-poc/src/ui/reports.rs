@@ -791,7 +791,7 @@ impl KioskState {
                             .text_size(ts(11.))
                             .font_weight(FontWeight::BOLD)
                             .text_color(c(theme::TEAL))
-                            .child("PRINTING COMPLETE"),
+                            .child("PRINT JOB SUBMITTED"),
                     )
                     .child(
                         div()
@@ -813,14 +813,14 @@ impl KioskState {
                             .text_size(ts(19.))
                             .line_height(ts(30.))
                             .text_color(c(theme::SUCCESS))
-                            .child("本次共打印 ")
+                            .child("本次已提交 ")
                             .child(
                                 div()
                                     .font_weight(FontWeight::EXTRA_BOLD)
                                     .text_color(c(0xF7D154))
                                     .child(count.to_string()),
                             )
-                            .child(" 份报告，请在出纸口取走并妥善保管。即将返回报告列表。"),
+                            .child(" 份报告，请等待出纸；如未出纸，请联系工作人员。"),
                     )
                     .child(
                         div()

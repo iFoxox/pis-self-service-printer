@@ -9,6 +9,7 @@ pub mod config;
 pub mod log;
 pub mod logo;
 pub mod pis;
+pub mod print_jobs;
 pub mod printer;
 #[cfg(target_os = "windows")]
 pub mod printer_win;
@@ -37,21 +38,26 @@ pub fn query_reports_blocking(
     runtime().block_on(pis::query_patient_print(config, keyword.to_string()))
 }
 
-/// 报告打印状态回写（阻塞，供后台线程调用；结果只写日志，不影响患者流程）
-pub fn update_print_status_blocking(config: AppConfig, ids: Vec<String>) {
+/// Called only by the durable outbox, never inside the print loop.
+pub fn update_print_status_blocking(
+    config: AppConfig,
+    ids: Vec<String>,
+) -> Result<(), pis::RequestFailure> {
     runtime().block_on(async {
-        let result = pis::post::<bool>(
+        match pis::post_with_delivery::<bool>(
             &config,
             "/update/patient/print/status",
             serde_json::json!({ "ids": ids }),
         )
-        .await;
-        match &result {
-            Ok(true) => log::info("pis-api", "报告状态回写成功"),
-            Ok(false) => log::warn("pis-api", "报告状态回写未确认"),
-            Err(e) => log::warn("pis-api", &format!("报告状态回写失败: {e}")),
+        .await?
+        {
+            true => Ok(()),
+            false => Err(pis::RequestFailure {
+                message: "报告状态回写未确认".into(),
+                safe_to_retry: false,
+            }),
         }
-    });
+    })
 }
 
 /// 打印报告（阻塞，供后台线程调用；PDFium 光栅化 + GDI 输出可能耗时数秒）

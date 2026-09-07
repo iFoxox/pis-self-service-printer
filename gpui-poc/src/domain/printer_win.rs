@@ -12,6 +12,7 @@ use windows::Graphics::Imaging::{
     ExifOrientationMode,
 };
 use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
+use windows::Win32::Foundation::{ERROR_CANCELLED, ERROR_PRINT_CANCELLED, GetLastError};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDCW, DEVMODEW, DIB_RGB_COLORS, DM_IN_BUFFER,
     DM_ORIENTATION, DM_OUT_BUFFER, DM_PAPERSIZE, DeleteDC, GetDeviceCaps, HDC, HORZRES,
@@ -23,9 +24,8 @@ use windows::Win32::Graphics::Printing::{
 };
 use windows::Win32::Storage::Xps::{AbortDoc, DOCINFOW, EndDoc, EndPage, StartDocW, StartPage};
 use windows::core::{Interface, PCWSTR};
-use windows::Win32::Foundation::{GetLastError, ERROR_CANCELLED, ERROR_PRINT_CANCELLED};
 
-use super::printer::PRINT_CANCELLED_ERR;
+use super::printer::{PRINT_CANCELLED_ERR, PRINT_UNCERTAIN_ERR};
 
 const PRINT_DPI: f32 = 300.0;
 const MAX_PIXELS: u64 = 40_000_000;
@@ -62,7 +62,7 @@ pub fn print_pdf(
     printer: Option<&str>,
     paper: Option<&str>,
     orientation: Option<&str>,
-) -> Result<(), String> {
+) -> Result<Option<i32>, String> {
     let printer_name = match printer.map(str::trim).filter(|name| !name.is_empty()) {
         Some(name) => name.to_string(),
         None => super::printer::default_printer_name().unwrap_or_default(),
@@ -73,21 +73,19 @@ pub fn print_pdf(
 
     let bytes = std::fs::read(file_path).map_err(|e| format!("读取 PDF 文件失败: {e}"))?;
 
-    if let Err(primary_error) = print_with_windows_data(&bytes, &printer_name, paper, orientation) {
-        // 用户主动取消：不走 PDFium 兜底，直接交由 UI 静默处理
-        if primary_error == PRINT_CANCELLED_ERR {
-            return Err(primary_error);
+    match print_with_windows_data(&bytes, &printer_name, paper, orientation) {
+        Ok(job_id) => Ok(Some(job_id)),
+        Err(e) if e.contains(PRINT_UNCERTAIN_ERR) || e == PRINT_CANCELLED_ERR => Err(e),
+        Err(primary_error) => {
+            super::log::warn(
+                "printer-win",
+                &format!("系统渲染初始化失败，使用 PDFium：{primary_error}"),
+            );
+            print_with_pdfium(file_path, &printer_name, paper, orientation)
+                .map(Some)
+                .map_err(|e| format!("系统渲染失败: {primary_error}；PDFium 失败: {e}"))
         }
-        super::log::warn(
-            "printer-win",
-            &format!("Windows.Data.Pdf 打印失败，准备使用 PDFium 兜底: {primary_error}"),
-        );
-        return print_with_pdfium(file_path, &printer_name, paper, orientation).map_err(|e| {
-            format!("Windows.Data.Pdf 打印失败: {primary_error}；PDFium 兜底失败: {e}")
-        });
     }
-
-    Ok(())
 }
 
 /// 使用 WinRT Windows.Data.Pdf 光栅化并打印
@@ -96,7 +94,7 @@ fn print_with_windows_data(
     printer_name: &str,
     paper: Option<&str>,
     orientation: Option<&str>,
-) -> Result<(), String> {
+) -> Result<i32, String> {
     let document = load_pdf_document(bytes)?;
     let page_count = document
         .PageCount()
@@ -105,10 +103,15 @@ fn print_with_windows_data(
         return Err("PDF 没有可打印的页面".into());
     }
 
-    let hdc = begin_print_job(printer_name, paper, orientation)?;
-    let mut result = Ok(());
+    let first_page = render_page_with_winrt(&document, 0)?;
+    let (hdc, job_id) = begin_print_job(printer_name, paper, orientation)?;
+    let mut result = draw_page(hdc, &first_page);
+    drop(first_page);
 
-    for index in 0..page_count {
+    for index in 1..page_count {
+        if result.is_err() {
+            break;
+        }
         match render_page_with_winrt(&document, index).and_then(|page| draw_page(hdc, &page)) {
             Ok(()) => {}
             Err(e) => {
@@ -118,16 +121,7 @@ fn print_with_windows_data(
         }
     }
 
-    unsafe {
-        if result.is_ok() {
-            EndDoc(hdc);
-        } else {
-            let _ = AbortDoc(hdc);
-        }
-        let _ = DeleteDC(hdc);
-    }
-
-    result
+    finish_print_job(hdc, job_id, result)
 }
 
 /// 载入 PDF 文档（WinRT Windows.Data.Pdf）
@@ -166,7 +160,7 @@ fn print_with_pdfium(
     printer_name: &str,
     paper: Option<&str>,
     orientation: Option<&str>,
-) -> Result<(), String> {
+) -> Result<i32, String> {
     let pdfium = create_pdfium()?;
     let document = pdfium
         .load_pdf_from_file(file_path, None)
@@ -176,10 +170,15 @@ fn print_with_pdfium(
         return Err("PDF 没有可打印的页面".into());
     }
 
-    let hdc = begin_print_job(&printer_name, paper, orientation)?;
-    let mut result = Ok(());
+    let first_page = render_page_with_pdfium(&document, 0)?;
+    let (hdc, job_id) = begin_print_job(&printer_name, paper, orientation)?;
+    let mut result = draw_page(hdc, &first_page);
+    drop(first_page);
 
-    for index in 0..page_count {
+    for index in 1..page_count {
+        if result.is_err() {
+            break;
+        }
         match render_page_with_pdfium(&document, index).and_then(|page| draw_page(hdc, &page)) {
             Ok(()) => {}
             Err(e) => {
@@ -189,16 +188,24 @@ fn print_with_pdfium(
         }
     }
 
+    finish_print_job(hdc, job_id, result)
+}
+
+/// Once StartDoc succeeds, errors may follow partial physical output. Never
+/// restart the entire document using another renderer after this boundary.
+fn finish_print_job(hdc: HDC, job_id: i32, mut result: Result<(), String>) -> Result<i32, String> {
     unsafe {
-        if result.is_ok() {
-            EndDoc(hdc);
-        } else {
+        if result.is_ok() && EndDoc(hdc) <= 0 {
+            result = Err(cancelled_or_default("结束打印作业失败"));
+        }
+        if result.is_err() {
             let _ = AbortDoc(hdc);
         }
         let _ = DeleteDC(hdc);
     }
-
-    result
+    result.map(|_| job_id).map_err(|e| {
+        format!("{PRINT_UNCERTAIN_ERR}打印作业 {job_id} 结果未确认，可能已部分出纸，请联系工作人员核对：{e}")
+    })
 }
 
 /// 初始化随应用分发的 PDFium 动态库
@@ -316,8 +323,7 @@ fn render_page_with_winrt(document: &WinRtPdfDocument, index: u32) -> Result<Pag
 
     // 新版 Windows 会校验 transform 指针，传 None（空指针）会报 E_POINTER
     // （0x80004003），必须传入恒等变换对象
-    let transform = BitmapTransform::new()
-        .map_err(|e| format!("创建位图变换失败: {e}"))?;
+    let transform = BitmapTransform::new().map_err(|e| format!("创建位图变换失败: {e}"))?;
 
     let provider = decoder
         .GetPixelDataTransformedAsync(
@@ -351,7 +357,7 @@ fn begin_print_job(
     printer_name: &str,
     paper: Option<&str>,
     orientation: Option<&str>,
-) -> Result<HDC, String> {
+) -> Result<(HDC, i32), String> {
     let name_wide = to_wide(printer_name);
     let driver_wide = to_wide("WINSPOOL");
     let empty_wide = [0u16];
@@ -397,14 +403,18 @@ fn begin_print_job(
             };
         }
 
-        DocumentPropertiesW(
+        if DocumentPropertiesW(
             None,
             handle,
             PCWSTR(name_wide.as_ptr()),
             Some(devmode),
             Some(devmode),
             DM_IN_BUFFER.0 | DM_OUT_BUFFER.0,
-        );
+        ) != 1
+        {
+            let _ = ClosePrinter(handle);
+            return Err("应用打印纸张/方向设置失败".into());
+        }
         let _ = ClosePrinter(handle);
 
         let hdc = CreateDCW(
@@ -427,13 +437,16 @@ fn begin_print_job(
             lpszDatatype: PCWSTR::null(),
             fwType: 0,
         };
-        if StartDocW(hdc, &docinfo) <= 0 {
+        let job_id = StartDocW(hdc, &docinfo);
+        if job_id <= 0 {
+            let error = cancelled_or_default("启动打印作业失败");
             let _ = DeleteDC(hdc);
-            return Err(cancelled_or_default("启动打印作业失败"));
+            return Err(error);
         }
 
         SetStretchBltMode(hdc, STRETCH_HALFTONE);
-        Ok(hdc)
+        super::log::info("printer-win", &format!("启动打印作业 {job_id}"));
+        Ok((hdc, job_id))
     }
 }
 
@@ -498,11 +511,12 @@ fn draw_page(hdc: HDC, page: &PageBitmap) -> Result<(), String> {
             DIB_RGB_COLORS,
             SRCCOPY,
         );
-        EndPage(hdc);
-
-        if written == 0 {
-            // 用户在系统打印进度对话框点了「取消」不算错误，交给 UI 静默处理
+        if written == 0 || written == -1 {
+            // 作业开始后的取消也可能已有出纸，由调用方标为待核对。
             return Err(cancelled_or_default("输出打印页面失败"));
+        }
+        if EndPage(hdc) <= 0 {
+            return Err(cancelled_or_default("结束打印页面失败"));
         }
     }
     Ok(())

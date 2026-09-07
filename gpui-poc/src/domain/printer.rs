@@ -318,6 +318,8 @@ pub fn default_printer_name() -> Result<String, String> {
 
 /// 用户在系统打印对话框 / 假脱机程序取消打印的标记错误。
 /// UI 层据此静默返回报告页并重新计时，而不是弹出错误。
+pub const PRINT_UNCERTAIN_ERR: &str = "__print_uncertain__";
+
 pub const PRINT_CANCELLED_ERR: &str = "__print_cancelled__";
 
 #[cfg(all(test, target_os = "windows"))]
@@ -358,7 +360,7 @@ pub fn print_file(
     printer: Option<&str>,
     paper: Option<&str>,
     orientation: Option<&str>,
-) -> Result<(), String> {
+) -> Result<Option<i32>, String> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         let mut cmd = Command::new("lp");
@@ -381,7 +383,7 @@ pub fn print_file(
         cmd.arg(file_path);
         let out = cmd.output().map_err(|e| format!("调用 lp 失败: {e}"))?;
         if out.status.success() {
-            Ok(())
+            Ok(None)
         } else {
             Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
         }

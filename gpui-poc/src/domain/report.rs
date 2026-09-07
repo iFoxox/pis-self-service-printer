@@ -39,6 +39,7 @@ pub struct ReportItem {
 #[serde(rename_all = "camelCase")]
 pub struct PrintReportResult {
     pub report_id: String,
+    pub spool_job_id: Option<i32>,
 }
 
 /// 解析报告数据：兼容 `...,base64,...` 前缀与裸 base64，并校验 PDF 魔数
@@ -119,7 +120,7 @@ pub fn print_report(
     );
     let file_path = std::env::temp_dir().join(file_name);
 
-    let result = (|| -> Result<(), String> {
+    let result = (|| -> Result<Option<i32>, String> {
         std::fs::write(&file_path, &buffer).map_err(|e| format!("写入临时文件失败: {e}"))?;
         printer::print_file(
             file_path.to_str().unwrap_or_default(),
@@ -132,13 +133,14 @@ pub fn print_report(
     let _ = std::fs::remove_file(&file_path);
 
     match result {
-        Ok(()) => {
+        Ok(spool_job_id) => {
             log::info(
                 "report-print",
                 &format!("报告 {} 已提交到打印机 {printer_name}", report.id),
             );
             Ok(PrintReportResult {
                 report_id: report.id,
+                spool_job_id,
             })
         }
         Err(e) => {

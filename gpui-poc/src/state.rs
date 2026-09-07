@@ -56,6 +56,7 @@ pub fn is_password_field(key: &str) -> bool {
 
 pub struct KioskState {
     pub config: ConfigStore,
+    pub print_jobs: Result<std::sync::Arc<crate::domain::print_jobs::PrintJobs>, String>,
     pub focus_handle: gpui::FocusHandle,
     pub page: Page,
     // 查询 / 打印
@@ -128,7 +129,12 @@ impl KioskState {
         cx: &mut gpui::Context<Self>,
     ) -> Self {
         let countdown = config.get().terminal.idle_timeout_seconds.max(10);
+        let print_jobs = crate::domain::print_jobs::PrintJobs::start(config.clone());
+        if let Err(e) = &print_jobs {
+            crate::domain::log::error("print-outbox", e);
+        }
         let state = Self {
+            print_jobs,
             config,
             page: Page::Home,
             keyword: String::new(),
@@ -225,7 +231,11 @@ impl KioskState {
 
     /// 报告是否不可选择（已打印且未开启补打）
     pub fn report_disabled(&self, report: &ReportItem) -> bool {
-        report.is_patient_print == Some(1) && !self.cfg().print.allow_reprint
+        (report.is_patient_print == Some(1) && !self.cfg().print.allow_reprint)
+            || self
+                .print_jobs
+                .as_ref()
+                .map_or(true, |jobs| jobs.blocked(&self.cfg(), report))
     }
 
     /// 可选择的报告下标
@@ -248,7 +258,10 @@ impl KioskState {
     }
 
     /// 查询结果装载（含自动全选逻辑，对应 store.setReports）
-    pub fn set_reports(&mut self, items: Vec<ReportItem>) {
+    pub fn set_reports(&mut self, mut items: Vec<ReportItem>) {
+        if let Ok(jobs) = &self.print_jobs {
+            jobs.overlay(&self.cfg(), &mut items);
+        }
         let auto = self.cfg().terminal.auto_select_reports;
         self.reports = items;
         self.selected = self
@@ -591,6 +604,13 @@ impl KioskState {
         if reports.is_empty() {
             return;
         }
+        let jobs = match &self.print_jobs {
+            Ok(jobs) => jobs.clone(),
+            Err(e) => {
+                self.show_error(cx, format!("打印记录不可用，暂不能打印：{e}"));
+                return;
+            }
+        };
         self.printing = true;
         self.completed = false;
         crate::audio::stop_speaking();
@@ -612,42 +632,53 @@ impl KioskState {
         })
         .detach();
 
-        let keyword = self.keyword.trim().to_string();
+        let total = reports.len();
         let task = cx.background_spawn(async move {
-            let mut last_err: Option<String> = None;
-            let mut printed: Vec<ReportItem> = Vec::new();
-            for report in reports {
-                match crate::domain::print_report_blocking(&cfg, report.clone()) {
-                    Ok(_) => {
-                        printed.push(report.clone());
-                        // 状态回写（结果只写日志）
-                        crate::domain::update_print_status_blocking(
-                            cfg.clone(),
-                            vec![report.id.clone()],
-                        );
-                    }
-                    Err(e) => {
-                        last_err = Some(format!("{}：{e}", report.subject_name.clone()));
-                        break;
-                    }
-                }
-            }
-            (printed, last_err, keyword, cfg)
+            crate::domain::print_jobs::run_batch(
+                &cfg,
+                &jobs,
+                reports,
+                crate::domain::print_report_blocking,
+            )
         });
         cx.spawn(async move |this, cx| {
-            let (printed, err, keyword, cfg) = task.await;
+            let (printed, err) = task.await;
             let _ = this.update(cx, |state, cx| {
                 state.printing = false;
+                crate::domain::print_jobs::apply_submitted(
+                    &mut state.reports,
+                    &mut state.selected,
+                    &printed,
+                );
+                // Uncertain jobs are blocked even when reprinting is enabled.
+                for index in 0..state.reports.len() {
+                    if state.report_disabled(&state.reports[index]) {
+                        state.selected[index] = false;
+                    }
+                }
                 if let Some(e) = err {
                     // 用户在系统打印对话框取消：不算错误，静默返回报告页并重新计时
                     // （contains：取消标记可能被外层错误链包裹）
-                    if e.contains(crate::domain::printer::PRINT_CANCELLED_ERR) {
+                    if e.contains(crate::domain::printer::PRINT_CANCELLED_ERR)
+                        && !e.contains(crate::domain::printer::PRINT_UNCERTAIN_ERR)
+                        && printed.is_empty()
+                    {
                         crate::domain::log::info("print", "用户取消了打印");
                         state.reset_countdown();
                         cx.notify();
                         return;
                     }
-                    state.show_error(cx, e);
+                    let detail = e
+                        .replace(crate::domain::printer::PRINT_UNCERTAIN_ERR, "")
+                        .replace(crate::domain::printer::PRINT_CANCELLED_ERR, "已取消");
+                    state.show_error(
+                        cx,
+                        format!(
+                            "已提交 {} 份报告，{} 份未完成：{detail}",
+                            printed.len(),
+                            total.saturating_sub(printed.len()),
+                        ),
+                    );
                     state.reset_countdown();
                     cx.notify();
                     return;
@@ -660,55 +691,8 @@ impl KioskState {
                 state.completed = true;
                 state.success_countdown = 6;
 
-                // 成功项从本地列表标记为已打印并取消选中
-                let printed_ids: Vec<String> = printed.iter().map(|r| r.id.clone()).collect();
-                for report in &mut state.reports {
-                    if printed_ids.contains(&report.id) {
-                        report.is_patient_print = Some(1);
-                        report.patient_print_count += 1;
-                    }
-                }
-                state.selected = vec![false; state.reports.len()];
-
-                // 打印完成语音延迟 2 秒（留出出纸时间）
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_secs(2))
-                        .await;
-                    let _ = this.update(cx, |state, _cx| {
-                        crate::audio::speak(crate::audio::VoiceKey::PrintComplete, &state.cfg());
-                    });
-                })
-                .detach();
-
-                // 重新查询刷新列表状态（失败仅提示，不影响成功反馈）
-                state.requery_reports(keyword, cfg, cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// 打印完成后重新查询，刷新报告列表（对应 ReportsView printSelected 中的二次 queryReports）
-    fn requery_reports(
-        &mut self,
-        keyword: String,
-        cfg: crate::domain::config::AppConfig,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        let task = cx
-            .background_spawn(async move { crate::domain::query_reports_blocking(&cfg, &keyword) });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |state, cx| {
-                match result {
-                    Ok(list) => {
-                        state.set_reports(list);
-                    }
-                    Err(e) => {
-                        state.show_error(cx, format!("打印完成，但列表刷新失败：{e}"));
-                    }
-                }
+                // Queue submission is not proof of paper output. Do not play
+                // the old “collect your report” voice on a fixed two-second timer.
                 cx.notify();
             });
         })
