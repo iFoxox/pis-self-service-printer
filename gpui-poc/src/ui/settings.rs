@@ -389,6 +389,13 @@ impl KioskState {
                 format!("{} 天", draft_cfg.terminal.log_retention_days),
             ))
             .child(self.render_log_dir_row(cx, &draft_cfg.terminal.log_dir))
+            .child(self.toggle_row(
+                cx,
+                "api_logging_enabled",
+                "接口请求与响应日志",
+                draft_cfg.terminal.api_logging_enabled,
+                |this, v| this.draft.config.terminal.api_logging_enabled = v,
+            ))
             .child(self.render_config_location_row(cx))
             .child(self.render_backup_row(cx))
             .child(self.text_field("exit_password"))
@@ -533,7 +540,7 @@ impl KioskState {
                                             .outline()
                                             .min_w(s(150.))
                                             .h(s(52.))
-                                            .label("取消")
+                                            .label("关闭页面")
                                             .on_click(cx.listener(|this, _event, _window, cx| {
                                                 this.play_click(cx);
                                                 this.go_home();

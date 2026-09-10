@@ -29,6 +29,7 @@
     "inputHint": "输入登记号/病历号",
     "logRetentionDays": 30,
     "logDir": "",
+    "apiLoggingEnabled": false,
     "autoSelectReports": false,
     "voiceEnabled": true,
     "voiceVolume": 80,

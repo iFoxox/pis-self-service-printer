@@ -158,10 +158,12 @@ pub(crate) async fn post_with_delivery<T: DeserializeOwned + Default>(
     let timeout_secs = u64::from(config.service.request_timeout_seconds.min(5));
     let client = http_client(timeout_secs)?;
 
-    log::info(
-        "pis-api",
-        &format!("POST {url} 请求入参: {}", Value::Object(map.clone())),
-    );
+    if config.terminal.api_logging_enabled {
+        log::info(
+            "pis-api",
+            &format!("POST {url} 请求入参: {}", Value::Object(map.clone())),
+        );
+    }
 
     let response = client
         .post(url)
@@ -197,10 +199,12 @@ pub(crate) async fn post_with_delivery<T: DeserializeOwned + Default>(
             safe_to_retry: false,
         }
     })?;
-    log::info(
-        "pis-api",
-        &format!("{pathname} HTTP {} 响应: {text}", status.as_u16()),
-    );
+    if config.terminal.api_logging_enabled {
+        log::info(
+            "pis-api",
+            &format!("{pathname} HTTP {} 响应: {text}", status.as_u16()),
+        );
+    }
     let payload: Result<PisResponse<T>, _> = serde_json::from_str(&text);
 
     if !status.is_success() {

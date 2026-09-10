@@ -66,6 +66,8 @@ pub struct TerminalConfig {
     pub input_hint: String,
     pub log_retention_days: u32,
     pub log_dir: String,
+    #[serde(default)]
+    pub api_logging_enabled: bool,
     pub auto_select_reports: bool,
     pub voice_enabled: bool,
     pub voice_volume: u32,
@@ -89,6 +91,7 @@ impl Default for TerminalConfig {
             input_hint: "输入登记号/病历号".into(),
             log_retention_days: 30,
             log_dir: String::new(),
+            api_logging_enabled: false,
             auto_select_reports: false,
             voice_enabled: true,
             voice_volume: 80,
