@@ -104,13 +104,15 @@ jobs:
       - name: Package (exe + bundled config)
         run: |
           $stage = "gpui-poc/dist"
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "gpui-poc/target/release/pisSelfServicePrinter.exe" $stage
           Copy-Item "gpui-poc/target/release/pdfium.dll" $stage
-          # 打包内置配置模板（config/ 随包分发，路径解析见 src/paths.rs resource_dir）
-          if (Test-Path "resources/config") {
-            Copy-Item -Recurse -Force "resources/config" "$stage/config"
-          }
+          # 只分发示例模板，覆盖解压也不会替换现场配置或携带开发配置
+          New-Item -ItemType Directory -Force -Path "$stage/config" | Out-Null
+          Copy-Item "resources/config/app-config.json" "$stage/config/app-config.example.json"
+          Copy-Item "gpui-poc/packaging/open-config-dir.cmd" "$stage/打开配置目录.cmd"
+          Copy-Item "gpui-poc/packaging/config-location.txt" "$stage/config/config-location.txt"
           $version = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0,7))" }
           $zip = "gpui-poc-kiosk-$version-windows-x64.zip"
           Compress-Archive -Path "$stage/*" -DestinationPath $zip -Force

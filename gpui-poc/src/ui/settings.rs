@@ -389,6 +389,7 @@ impl KioskState {
                 format!("{} 天", draft_cfg.terminal.log_retention_days),
             ))
             .child(self.render_log_dir_row(cx, &draft_cfg.terminal.log_dir))
+            .child(self.render_config_location_row(cx))
             .child(self.render_backup_row(cx))
             .child(self.text_field("exit_password"))
             .child(self.text_field("minimize_password"))
@@ -782,6 +783,48 @@ impl KioskState {
                         this.clear_settings_field(field, window, cx);
                     }))
             }))
+            .into_any_element()
+    }
+
+    /// 显示实际读写的配置路径，避免误改安装目录中的模板或历史文件。
+    fn render_config_location_row(&self, cx: &Context<Self>) -> gpui::AnyElement {
+        let path = self.config.path().to_path_buf();
+        let dir = path.parent().expect("配置目录").to_path_buf();
+        div()
+            .col_span(2)
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(Self::form_label("当前配置文件"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(c(theme::MUTED))
+                    .child(path.display().to_string()),
+            )
+            .child(div().text_xs().text_color(c(theme::MUTED)).child(
+                "手工修改：先打开目录，再退出软件；编辑 app-config.json 并保存，重新启动后生效。",
+            ))
+            .children(self.config.migration_warning().map(|warning| {
+                div()
+                    .text_xs()
+                    .text_color(c(0x91560F))
+                    .child(warning.to_string())
+            }))
+            .child(
+                div().child(
+                    Button::new("open-config-directory")
+                        .small()
+                        .outline()
+                        .label("打开配置目录")
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.play_click(cx);
+                            if let Err(error) = crate::paths::open_directory(&dir) {
+                                this.show_error(cx, format!("无法打开配置目录：{error}"));
+                            }
+                        })),
+                ),
+            )
             .into_any_element()
     }
 

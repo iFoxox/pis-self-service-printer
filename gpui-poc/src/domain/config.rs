@@ -1,11 +1,13 @@
 //! 配置存储（平移自 src-tauri/src/config.rs，移除 Tauri IPC）
 //!
-//! 含托管式更新：内置模板内容指纹变化时，模板预置值自动覆盖用户配置
-//! （仅覆盖模板中包含的字段），无需人工维护版本号。
+//! 用户配置优先；结构升级前备份，校验成功后原子保存。
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::Digest;
+use std::io::{self, Write};
+
+pub const CURRENT_CONFIG_VERSION: u32 = 1;
 use std::path::PathBuf;
 
 pub const DEFAULT_REPORT_NOTICE: &str = "只能查询到180天以内的报告，超出时间请到窗口询问工作人员";
@@ -104,7 +106,7 @@ impl Default for TerminalConfig {
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     pub config_version: u32,
-    /// 已应用的内置模板内容指纹（空 = 未应用；仅由后端维护，保存设置时传入的值会被忽略）
+    /// 保留旧版模板指纹以兼容历史配置；不再用于覆盖用户设置。
     #[serde(default)]
     pub applied_template_version: String,
     pub hospital_name: String,
@@ -127,7 +129,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            config_version: 1,
+            config_version: CURRENT_CONFIG_VERSION,
             applied_template_version: String::new(),
             hospital_name: "病理报告自助服务".into(),
             hospital_logo: String::new(),
@@ -162,198 +164,171 @@ fn merge_json(defaults: &Value, overlay: &Value) -> Value {
     }
 }
 
-/// 计算模板内容的稳定指纹（sha256 前 8 字节十六进制）。
-/// 先解析为 JSON 再规范化序列化，键序/缩进/空格差异不影响指纹；
-/// 模板内容一旦被修改，指纹必然变化，从而自动触发托管更新。
-fn template_fingerprint(template: &Value) -> String {
-    let canonical = serde_json::to_string(template).unwrap_or_default();
-    let digest = sha2::Sha256::digest(canonical.as_bytes());
-    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// 备份损坏的用户配置文件，返回说明文字（备份失败返回 None）
-fn backup_corrupted_config(path: &std::path::Path) -> Option<String> {
-    let bak = path.with_extension("json.bak");
-    if std::fs::copy(path, &bak).is_ok() {
-        let name = bak
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        return Some(format!(
-            "用户配置文件解析失败，已备份为 {name} 并回退默认配置"
-        ));
-    }
-    None
-}
-
-/// 配置加载结果说明
-#[derive(Debug, Default)]
-pub struct ConfigLoadInfo {
-    /// 用户配置损坏并被回退的说明（warn 级日志）
-    pub warning: Option<String>,
-    /// 本次启动应用的托管模板更新指纹（info 级日志）
-    pub managed_update: Option<String>,
-    /// 本次启动应用了本地覆盖文件（info 级日志）
-    pub local_override_applied: bool,
-}
-
 // ==== ConfigStore ====
 
 /// 配置存储：内部持锁，支持读写文件
 #[derive(Clone)]
 pub struct ConfigStore {
     path: PathBuf,
+    migration_warning: Option<String>,
     inner: std::sync::Arc<std::sync::Mutex<AppConfig>>,
 }
 
 impl ConfigStore {
-    /// 从文件加载配置。
-    ///
-    /// 常规路径：默认值 <- 打包内置模板 <- 用户配置文件 <- 本地覆盖文件
-    /// （逐级覆盖，越靠后优先级越高）。
-    ///
-    /// 本地覆盖文件（app-config.local.json，与内置模板同目录）：
-    /// 供运维在终端机上手工配置，**安装器升级不覆盖、卸载不删除**，
-    /// 始终拥有最高优先级——需要"用户改了就以用户为准"的字段放这里，
-    /// 而不是直接改内置模板（模板会在升级时被新包覆盖）。
-    ///
-    /// 托管式更新：模板内容指纹与用户配置记录的 appliedTemplateVersion 不一致
-    /// （即模板被修改过，或用户配置尚未应用过模板）时，改为
-    /// 默认值 <- 用户配置 <- 模板（模板预置值覆盖用户值），
-    /// 应用后记录新指纹并立即持久化；此后模板未变则不再覆盖用户的后续修改。
-    /// 本地覆盖文件不受托管更新影响，任何情况下最后应用。
-    ///
-    /// 用户配置文件损坏（JSON 解析失败或字段类型不兼容）时，
-    /// 先备份为 <原名>.json.bak 再回退默认值。
+    /// 仅初始化时使用模板；已有用户值始终优先。失败时不修改原文件。
     pub fn load(
         path: PathBuf,
         bundled: Option<PathBuf>,
-        local_override: Option<PathBuf>,
-    ) -> (Self, ConfigLoadInfo) {
-        let mut info = ConfigLoadInfo::default();
-        let defaults = serde_json::to_value(AppConfig::default()).unwrap_or(json!({}));
-
-        // 内置模板
-        let template: Option<Value> = bundled
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|text| serde_json::from_str(&text).ok());
-
-        // 用户配置（损坏视为不存在，走备份回退流程）
-        let user_value: Option<Value> = match std::fs::read_to_string(&path) {
-            Ok(text) => match serde_json::from_str(&text) {
-                Ok(value) => Some(value),
-                Err(_) => {
-                    info.warning = backup_corrupted_config(&path);
-                    None
-                }
-            },
-            Err(_) => None,
-        };
-
-        // 本地覆盖文件（最高优先级；不存在或解析失败则忽略）
-        let local_override_value: Option<Value> = local_override
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|text| serde_json::from_str(&text).ok());
-
-        // 模板内容指纹与用户配置记录的指纹
-        let template_fp = template.as_ref().map(template_fingerprint);
-        let applied_fp = user_value
-            .as_ref()
-            .and_then(|u| u.get("appliedTemplateVersion"))
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-
-        // 指纹不一致 = 模板被修改过（或用户配置尚未应用过模板）→ 执行托管更新
-        let needs_apply = match (&template_fp, &applied_fp) {
-            (Some(fp), applied) => applied.as_deref() != Some(fp.as_str()),
-            (None, _) => false,
-        };
-
-        let mut base;
-        if needs_apply {
-            // 托管式更新：模板预置值覆盖用户配置（仅覆盖模板中包含的字段）
-            base = defaults;
-            if let Some(user) = &user_value {
-                base = merge_json(&base, user);
-            }
-            if let Some(t) = &template {
-                base = merge_json(&base, t);
-            }
-            if let Some(fp) = template_fp.as_deref() {
-                if let Value::Object(map) = &mut base {
-                    map.insert("appliedTemplateVersion".into(), json!(fp));
-                }
-            }
-            info.managed_update = template_fp;
+        legacy: &[PathBuf],
+    ) -> anyhow::Result<Self> {
+        let source = if path.try_exists()? {
+            Some(path.clone())
         } else {
-            base = defaults;
-            if let Some(t) = &template {
-                base = merge_json(&base, t);
-            }
-            if let Some(user) = &user_value {
-                base = merge_json(&base, user);
-            }
-        }
-
-        // 本地覆盖文件最后应用：任何情况下优先级最高
-        if let Some(local) = &local_override_value {
-            base = merge_json(&base, local);
-            info.local_override_applied = true;
-        }
-
-        let config = match serde_json::from_value::<AppConfig>(base) {
-            Ok(config) => config,
-            Err(_) => {
-                if info.warning.is_none() {
-                    info.warning = backup_corrupted_config(&path);
+            let mut found = None;
+            for candidate in legacy {
+                if candidate.try_exists()? {
+                    found = Some(candidate.clone());
+                    break;
                 }
-                AppConfig::default()
             }
+            found
         };
-
-        let store = Self {
+        let defaults = serde_json::to_value(AppConfig::default())?;
+        let value = if let Some(source) = &source {
+            let text = std::fs::read_to_string(source)
+                .with_context(|| format!("无法读取配置 {}", source.display()))?;
+            serde_json::from_str::<Value>(&text)
+                .with_context(|| format!("配置 JSON 无效 {}", source.display()))?
+        } else if let Some(template) = bundled {
+            serde_json::from_slice::<Value>(&std::fs::read(template)?)?
+        } else {
+            json!({})
+        };
+        let migrated = migrate_config(value.clone())?;
+        let merged = merge_json(&defaults, &migrated);
+        let config: AppConfig = serde_json::from_value(merged)?;
+        let needs_save = source.as_ref() != Some(&path) || migrated != value;
+        if needs_save {
+            if let Some(source) = &source {
+                backup_before_change(source, &path)?;
+            }
+            write_config(&path, &config)?;
+        }
+        // 只有新配置落盘后才标记旧文件；标记失败不回滚已成功的迁移。
+        let migration_warning = source.as_ref().filter(|source| *source != &path)
+            .and_then(|source| retire_legacy_config(source, &path).err())
+            .map(|error| format!("配置已迁移到 {}，但旧文件未能完整标记：{error}。请只编辑新配置，退出程序后修改并重新启动。", path.display()));
+        if let Some(warning) = &migration_warning {
+            crate::domain::log::warn("config", warning);
+        }
+        Ok(Self {
+            migration_warning,
             path,
             inner: std::sync::Arc::new(std::sync::Mutex::new(config)),
-        };
+        })
+    }
 
-        // 托管更新立即持久化：即使随后崩溃，下次启动也不会重复覆盖用户配置
-        if info.managed_update.is_some() {
-            let _ = store.save();
-        }
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
 
-        (store, info)
+    pub fn migration_warning(&self) -> Option<&str> {
+        self.migration_warning.as_deref()
     }
 
     pub fn get(&self) -> AppConfig {
         self.inner.lock().unwrap().clone()
     }
 
-    /// 更新配置并保存到磁盘；返回保存结果
-    pub fn set(&self, config: AppConfig) -> std::io::Result<()> {
-        let mut config = config;
-        // appliedTemplateVersion 仅由后端维护，忽略调用方传入值，防止意外重置
-        // （否则重置为空会导致下次启动重复执行模板托管更新、覆盖用户修改）
-        config.applied_template_version =
-            self.inner.lock().unwrap().applied_template_version.clone();
-        *self.inner.lock().unwrap() = config;
-        self.save()
-    }
-    /// 保存到磁盘；返回写入结果（失败时记录错误日志，供 UI 提示）
-    pub fn save(&self) -> std::io::Result<()> {
-        let config = self
+    /// 持久化成功后才更新内存，避免 UI 与磁盘状态不一致。
+    pub fn set(&self, mut config: AppConfig) -> io::Result<()> {
+        let mut current = self
             .inner
             .lock()
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        let json = serde_json::to_string_pretty(&*config).unwrap_or_default();
-        let result = std::fs::write(&self.path, json);
-        if let Err(e) = &result {
-            crate::domain::log::error(
-                "config",
-                &format!("配置写入失败 {}: {e}", self.path.display()),
-            );
-        }
-        result
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        config.config_version = CURRENT_CONFIG_VERSION;
+        config.applied_template_version = current.applied_template_version.clone();
+        backup_before_change(&self.path, &self.path)?;
+        write_config(&self.path, &config)?;
+        *current = config;
+        Ok(())
     }
+}
+
+/// 保留已迁移文件供人工回退；绝不覆盖已有归档。
+fn retire_legacy_config(source: &std::path::Path, target: &std::path::Path) -> io::Result<()> {
+    let archive = source.with_file_name("app-config.migrated.json");
+    if archive.try_exists()? {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("归档已存在 {}", archive.display()),
+        ));
+    }
+    let notice = source.with_file_name("config-migration.txt");
+    std::fs::write(
+        &notice,
+        format!(
+            "旧配置已迁移。实际配置文件：\r\n{}\r\n\r\napp-config.migrated.json 为历史归档，修改它不会生效。\r\n请使用安装目录的“打开配置目录”入口，或设置页的“打开配置目录”按钮。\r\n先退出终端，再编辑真实配置；保存后重新启动生效。\r\n请使用运行终端的同一 Windows 账号。\r\n",
+            target.display()
+        ),
+    )?;
+    // 复制到不覆盖的归档后删除旧名称；也支持不提供硬链接的文件系统。
+    let mut copy = tempfile::NamedTempFile::new_in(source.parent().expect("旧配置目录"))?;
+    copy.write_all(&std::fs::read(source)?)?;
+    copy.as_file().sync_all()?;
+    copy.persist_noclobber(&archive)
+        .map_err(|error| error.error)?;
+    std::fs::remove_file(source)?;
+    Ok(())
+}
+
+/// 当前 v1 没有需要改名的字段。以后在这里逐版本添加显式转换。
+fn migrate_config(mut value: Value) -> anyhow::Result<Value> {
+    anyhow::ensure!(value.is_object(), "配置必须是 JSON 对象");
+    let version = match value.get("configVersion") {
+        None => 1,
+        Some(v) => v
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("configVersion 必须为正整数"))?,
+    };
+    anyhow::ensure!(
+        version >= 1 && version <= CURRENT_CONFIG_VERSION as u64,
+        "不支持配置版本 {version}，当前程序支持版本 {CURRENT_CONFIG_VERSION}；请使用兼容程序或恢复升级前备份"
+    );
+    value["configVersion"] = json!(CURRENT_CONFIG_VERSION);
+    Ok(value)
+}
+
+/// 不轮转的升级/保存前快照，避免被周期备份清理。
+fn backup_before_change(path: &std::path::Path, target: &std::path::Path) -> io::Result<()> {
+    if !path.try_exists()? {
+        return Ok(());
+    }
+    let dir = target
+        .parent()
+        .ok_or_else(|| io::Error::other("配置缺少父目录"))?
+        .join("config-history");
+    std::fs::create_dir_all(&dir)?;
+    let mut backup = tempfile::Builder::new()
+        .prefix("app-config-")
+        .suffix(".json")
+        .tempfile_in(dir)?;
+    backup.write_all(&std::fs::read(path)?)?;
+    backup.as_file().sync_all()?;
+    backup.keep().map_err(|e| e.error)?;
+    Ok(())
+}
+
+fn write_config(path: &std::path::Path, config: &AppConfig) -> io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other("配置缺少父目录"))?;
+    std::fs::create_dir_all(dir)?;
+    let mut file = tempfile::NamedTempFile::new_in(dir)?;
+    serde_json::to_writer_pretty(&mut file, config)?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|e| e.error)?;
+    Ok(())
 }
 
 /// 配置文件定时备份。
@@ -414,5 +389,138 @@ pub fn backup_config_file(config_path: &std::path::Path, max_backups: usize) {
         let Some(oldest) = files.first() else { break };
         let _ = std::fs::remove_file(oldest);
         files.remove(0);
+    }
+}
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+
+    #[test]
+    fn upgrade_preserves_site_values_and_adds_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app-config.json");
+        let original = br#"{"configVersion":1,"hospitalName":"Site","service":{"baseUrl":"https://site","apiKey":"site-key"},"print":{"defaultPrinter":"Printer"}}"#;
+        std::fs::write(&path, original).unwrap();
+        let template = dir.path().join("template.json");
+        std::fs::write(&template, br#"{"hospitalName":"New default"}"#).unwrap();
+        let store = ConfigStore::load(path.clone(), Some(template), &[]).unwrap();
+        assert_eq!(store.get().hospital_name, "Site");
+        assert_eq!(store.get().service.api_key, "site-key");
+        assert_eq!(store.get().print.default_printer, "Printer");
+        assert_eq!(store.get().terminal.idle_timeout_seconds, 60);
+        assert_eq!(std::fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn legacy_migration_is_backed_up_and_runs_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("legacy.json");
+        let path = dir.path().join("data/app-config.json");
+        let original = br#"{"hospitalName":"Legacy"}"#;
+        std::fs::write(&legacy, original).unwrap();
+        let store = ConfigStore::load(path.clone(), None, &[legacy.clone()]).unwrap();
+        assert_eq!(store.get().hospital_name, "Legacy");
+        assert!(!legacy.exists());
+        let notice =
+            std::fs::read_to_string(legacy.with_file_name("config-migration.txt")).unwrap();
+        assert!(notice.contains(&path.display().to_string()));
+        assert!(notice.contains("重新启动"));
+        assert_eq!(
+            std::fs::read(legacy.with_file_name("app-config.migrated.json")).unwrap(),
+            original
+        );
+        let backup = std::fs::read_dir(path.parent().unwrap().join("config-history"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(std::fs::read(backup).unwrap(), original);
+        std::fs::write(&legacy, b"broken").unwrap();
+        assert_eq!(
+            ConfigStore::load(path, None, &[legacy])
+                .unwrap()
+                .get()
+                .hospital_name,
+            "Legacy"
+        );
+    }
+
+    #[test]
+    fn failed_migration_keeps_legacy_and_no_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("app-config.json");
+        let target = dir.path().join("data/app-config.json");
+        std::fs::write(&source, b"invalid json").unwrap();
+        assert!(ConfigStore::load(target.clone(), None, &[source.clone()]).is_err());
+        assert_eq!(std::fs::read(&source).unwrap(), b"invalid json");
+        assert!(!source.with_file_name("app-config.migrated.json").exists());
+        assert!(!target.exists());
+        // Valid source but blocked target directory must also leave the source untouched.
+        std::fs::write(&source, b"{}").unwrap();
+        std::fs::write(target.parent().unwrap(), b"blocked").unwrap();
+        assert!(ConfigStore::load(target, None, &[source.clone()]).is_err());
+        assert_eq!(std::fs::read(source).unwrap(), b"{}");
+    }
+
+    #[test]
+    fn archive_collision_warns_without_overwriting_either_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("app-config.json");
+        let archive = source.with_file_name("app-config.migrated.json");
+        let target = dir.path().join("data/app-config.json");
+        std::fs::write(&source, br#"{"hospitalName":"Site"}"#).unwrap();
+        std::fs::write(&archive, b"previous archive").unwrap();
+        let store = ConfigStore::load(target.clone(), None, &[source.clone()]).unwrap();
+        assert!(store.migration_warning().is_some());
+        assert_eq!(store.path(), target);
+        assert_eq!(store.get().hospital_name, "Site");
+        assert!(source.exists());
+        assert_eq!(std::fs::read(archive).unwrap(), b"previous archive");
+    }
+
+    #[test]
+    fn invalid_and_future_configs_are_never_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app-config.json");
+        for content in [
+            "broken",
+            "null",
+            "{\"configVersion\":99}",
+            "{\"service\":{\"baseUrl\":4}}",
+        ] {
+            std::fs::write(&path, content).unwrap();
+            assert!(ConfigStore::load(path.clone(), None, &[]).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        }
+    }
+
+    #[test]
+    fn fresh_install_and_failed_save_keep_consistent_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data/app-config.json");
+        let template = dir.path().join("template.json");
+        std::fs::write(&template, br#"{"hospitalName":"Initial"}"#).unwrap();
+        let store = ConfigStore::load(path.clone(), Some(template), &[]).unwrap();
+        let mut config = store.get();
+        config.hospital_name = "Saved".into();
+        store.set(config).unwrap();
+        assert_eq!(
+            ConfigStore::load(path.clone(), None, &[])
+                .unwrap()
+                .get()
+                .hospital_name,
+            "Saved"
+        );
+        // A file blocks backup-directory creation: save must fail before touching live data.
+        std::fs::remove_dir_all(path.parent().unwrap().join("config-history")).unwrap();
+        std::fs::write(path.parent().unwrap().join("config-history"), b"block").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut config = store.get();
+        config.hospital_name = "Unsaved".into();
+        assert!(store.set(config).is_err());
+        assert_eq!(store.get().hospital_name, "Saved");
+        assert_eq!(std::fs::read(path).unwrap(), before);
     }
 }

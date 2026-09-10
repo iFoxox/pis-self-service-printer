@@ -16,6 +16,10 @@ AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 DefaultDirName={autopf}\{#MyAppNameEn}
 DisableProgramGroupPage=yes
+CloseApplications=no
+RestartApplications=no
+; 要求先退出终端，避免打断打印；不强制终止进程
+AppMutex=PisSelfServicePrinterSingleInstance
 OutputDir=..\target\release\dist
 OutputBaseFilename=PISReportKiosk-{#MyAppVersion}-setup
 ; 版本号可由 CI 传入：ISCC /DMyAppVersion=<版本>
@@ -42,8 +46,11 @@ Name: "{app}\logs"
 Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 ; PDFium 随应用分发，避免目标机 Windows.Data.Pdf 异常时无法打印
 Source: "..\target\release\pdfium.dll"; DestDir: "{app}"; Flags: ignoreversion
-; 注意：app-config.json 即运行配置，升级重装前请先手动备份
-Source: "..\..\resources\config\app-config.json"; DestDir: "{app}\config"; Flags: ignoreversion
+; 仅更新模板；旧版 config\app-config.json 留给程序迁移，绝不覆盖或删除
+Source: "..\..\resources\config\app-config.json"; DestDir: "{app}\config"; DestName: "app-config.example.json"; Flags: ignoreversion
+
+Source: "open-config-dir.cmd"; DestDir: "{app}"; DestName: "打开配置目录.cmd"; Flags: ignoreversion
+Source: "config-location.txt"; DestDir: "{app}\config"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

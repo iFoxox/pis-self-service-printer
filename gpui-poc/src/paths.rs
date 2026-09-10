@@ -56,72 +56,53 @@ pub fn resource_dir() -> Option<PathBuf> {
     None
 }
 
-/// 配置文件路径：安装目录 config\app-config.json（单文件方案，
-/// 升级重装前需手动备份该文件）
+/// 正式配置与程序分离；debug 配置隔离，避免开发覆盖现场设置。
 pub fn config_file_path() -> PathBuf {
-    let dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(app_data_dir);
-    dir.join("config").join("app-config.json")
+    let root = app_data_dir();
+    root.join(if cfg!(debug_assertions) {
+        "debug-config"
+    } else {
+        "config"
+    })
+    .join("app-config.json")
 }
 
-/// 内置配置模板：debug 开发联调读仓库 resources/config/app-config-dev.json
-/// （dev 环境地址与测试凭据，模板变化时经托管更新覆盖本地调试配置）；
-/// release 安装包已把 resources/config/app-config.json 放到安装目录 config/
-/// 作为用户配置直接读写，无需模板，返回 None。
-///
-/// 不能复用 resource_dir()：debug 下首次运行后 target/debug/config/ 已存在，
-/// resource_dir() 会指向 exe 目录而非仓库 resources/。
+pub fn legacy_config_paths() -> Vec<PathBuf> {
+    if cfg!(debug_assertions) {
+        return vec![];
+    }
+    let mut paths = vec![];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            paths.push(dir.join("config/app-config.json"));
+        }
+    }
+    paths.push(app_data_dir().join("app-config.json"));
+    paths
+}
+
+/// 模板仅在无用户配置时初始化使用。
 pub fn bundled_template_path() -> Option<PathBuf> {
-    if !cfg!(debug_assertions) {
-        return None;
+    if cfg!(debug_assertions) {
+        return Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../resources/config/app-config-dev.json"),
+        );
     }
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("resources")
-        .join("config")
-        .join("app-config-dev.json");
-    path.exists().then_some(path)
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("config/app-config.example.json")))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// debug 构建必须能定位仓库 dev 模板，且内容确为联调配置（非生产模板）
-    #[test]
-    fn debug_build_locates_dev_template() {
-        let Some(template) = bundled_template_path() else {
-            panic!("debug 构建应能定位 resources/config/app-config-dev.json");
-        };
-        let text = std::fs::read_to_string(&template).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["terminalCode"], "PIS-KIOSK-DEV");
-    }
-
-    /// 首次运行：dev 模板经托管更新合并进空配置，联调字段生效
-    /// （baseUrl 断言取模板自身值，避免在源码中出现具体接口地址）
-    #[test]
-    fn fresh_load_applies_dev_template() {
-        let Some(template) = bundled_template_path() else {
-            panic!("debug 构建应能定位 dev 模板");
-        };
-        let text = std::fs::read_to_string(&template).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let expected_base_url = value["service"]["baseUrl"]
-            .as_str()
-            .expect("dev 模板应含 service.baseUrl")
-            .to_string();
-        let dir = std::env::temp_dir().join(format!("pis-paths-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let cfg_path = dir.join("app-config.json");
-        let (store, info) =
-            crate::domain::config::ConfigStore::load(cfg_path, Some(template), None);
-        assert!(info.managed_update.is_some(), "首次加载应执行托管更新");
-        let config = store.get();
-        assert_eq!(config.terminal_code, "PIS-KIOSK-DEV");
-        assert_eq!(config.service.base_url, expected_base_url);
-        std::fs::remove_dir_all(&dir).ok();
-    }
+/// 使用系统文件管理器打开目录；命令参数直接传递，支持空格和中文路径。
+pub fn open_directory(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    #[cfg(target_os = "windows")]
+    let program = "explorer.exe";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let program = "xdg-open";
+    std::process::Command::new(program).arg(path).spawn()?;
+    Ok(())
 }

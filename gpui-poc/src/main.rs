@@ -37,6 +37,18 @@ fn main() {
         crate::domain::log::error("panic", &format!("{location} {payload}"));
     }));
 
+    // 运维入口在单实例检查之前处理：终端运行中也能定位配置，且不启动业务。
+    if std::env::args_os().any(|arg| arg == "--open-config-dir") {
+        let path = paths::config_file_path();
+        if let Err(error) = paths::open_directory(path.parent().expect("配置目录")) {
+            native_window::show_startup_error(&format!(
+                "无法打开配置目录 {}：{error}",
+                path.display()
+            ));
+        }
+        return;
+    }
+
     // 单实例保护：终端机上重复启动会叠出第二个全屏窗口，直接退出新进程
     #[cfg(target_os = "windows")]
     if !native_window::acquire_single_instance() {
@@ -55,26 +67,28 @@ fn main() {
             // ==== 初始化领域层：配置存储 + 日志（平移自 src-tauri lib.rs setup） ====
             let data_dir = paths::app_data_dir();
             std::fs::create_dir_all(&data_dir).ok();
-            // 单文件配置：安装目录 config\app-config.json（升级重装前需手动备份）
             let config_path = paths::config_file_path();
-            std::fs::create_dir_all(config_path.parent().unwrap_or(&data_dir)).ok();
-
-            // 内置模板：debug 联调读仓库 resources/config/app-config-dev.json
-            // （dev 环境地址与测试凭据），release 包不传模板——安装器已把
-            // app-config.json 放到安装目录 config/ 下作为用户配置直接读取
-            let bundled_template = paths::bundled_template_path();
-            let (store, load_info) = domain::config::ConfigStore::load(
+            let store = match domain::config::ConfigStore::load(
                 config_path.clone(),
-                bundled_template.clone(),
-                None,
-            );
-            let initial = store.get();
-
-            // 首次运行把配置落盘（debug 已合并 dev 模板预置值），
-            // 保证安装目录下始终存在 config\app-config.json
-            if !config_path.exists() {
-                let _ = store.save();
+                paths::bundled_template_path(),
+                &paths::legacy_config_paths(),
+            ) {
+                Ok(store) => store,
+                Err(error) => {
+                    let message = format!(
+                        "配置加载失败，原配置已保留。请检查配置或恢复备份。\n{}\n{error:#}",
+                        config_path.display()
+                    );
+                    domain::log::error("config", &message);
+                    native_window::show_startup_error(&message);
+                    cx.quit();
+                    return;
+                }
+            };
+            if let Some(warning) = store.migration_warning() {
+                native_window::show_config_warning(warning);
             }
+            let initial = store.get();
 
             // 配置定时备份：启动时检查一次 + 每 30 分钟一次（内容变化才新增，
             // 滚动保留 30 份；备份在 %APPDATA% 下，重装/升级不触碰）
@@ -93,21 +107,6 @@ fn main() {
                 &initial.terminal.log_dir,
                 initial.terminal.log_retention_days,
             );
-            if let Some(note) = load_info.warning {
-                domain::log::warn("config", &note);
-            }
-            if let Some(fp) = load_info.managed_update {
-                domain::log::info(
-                    "config",
-                    &format!(
-                        "已应用内置配置模板 {}（指纹 {fp}）",
-                        bundled_template
-                            .as_ref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_default()
-                    ),
-                );
-            }
             domain::log::info("main", "GPUI 原型启动（病理报告自助打印终端）");
 
             // 音频输出（按键音 + 语音播报，失败静默）

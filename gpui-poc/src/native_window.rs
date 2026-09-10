@@ -80,12 +80,12 @@ fn set_borderless_fullscreen_hwnd(hwnd: windows::Win32::Foundation::HWND) -> boo
 /// 找到并调整成功返回 true（未找到返回 false，打印期间可反复调用）。
 #[cfg(target_os = "windows")]
 pub fn enlarge_system_save_dialog() -> bool {
-    use windows::core::PCWSTR;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, GetSystemMetrics, HWND_TOP, SM_CXSCREEN, SM_CYSCREEN, SetWindowPos,
-        SWP_NOZORDER,
+        FindWindowW, GetSystemMetrics, HWND_TOP, SM_CXSCREEN, SM_CYSCREEN, SWP_NOZORDER,
+        SetWindowPos,
     };
+    use windows::core::PCWSTR;
 
     // 中文 / 英文系统两种标题
     const TITLES: [&str; 2] = ["保存打印输出", "Save Print Output As"];
@@ -198,18 +198,24 @@ pub fn auto_hide_system_bars() {}
 /// 互斥量创建失败时放行启动（降级为旧行为，不因保护机制本身阻断终端）。
 #[cfg(target_os = "windows")]
 pub fn acquire_single_instance() -> bool {
-    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
     use windows::Win32::System::Threading::CreateMutexW;
+    use windows::core::PCWSTR;
 
     const MUTEX_NAME: &str = "PisSelfServicePrinterSingleInstance";
 
     unsafe {
-        let name: Vec<u16> = MUTEX_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+        let name: Vec<u16> = MUTEX_NAME
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let _handle = match CreateMutexW(None, false, PCWSTR(name.as_ptr())) {
             Ok(handle) => handle,
             Err(e) => {
-                crate::domain::log::warn("main", &format!("单实例互斥量创建失败（{e}），跳过保护继续启动"));
+                crate::domain::log::warn(
+                    "main",
+                    &format!("单实例互斥量创建失败（{e}），跳过保护继续启动"),
+                );
                 return true;
             }
         };
@@ -258,4 +264,30 @@ pub fn set_app_icon() {
         NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&icon));
         crate::domain::log::info("window", "macOS 运行时应用图标已设置");
     }
+}
+
+/// 配置无法安全加载时明确提示，不启动业务流程。
+pub fn show_startup_error(message: &str) {
+    show_config_message("配置加载失败", message);
+}
+
+pub fn show_config_warning(message: &str) {
+    show_config_message("配置迁移提示", message);
+}
+
+fn show_config_message(title: &str, message: &str) {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+        let text: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+        let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+        MessageBoxW(
+            None,
+            windows::core::PCWSTR(text.as_ptr()),
+            windows::core::PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+    #[cfg(not(target_os = "windows"))]
+    eprintln!("{title}: {message}");
 }

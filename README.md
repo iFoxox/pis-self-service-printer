@@ -75,10 +75,28 @@ cargo build --release --manifest-path gpui-poc/Cargo.toml   # 生产构建
 
 配置在终端「设置」面板中维护，保存后写入系统应用数据目录下的 `app-config.json`：
 
-- Windows: `%APPDATA%\com.pis.report.kiosk\`
-- macOS: `~/Library/Application Support/com.pis.report.kiosk/`
+- Windows: `%APPDATA%\com.pis.report.kiosk\config\`
+- macOS: `~/Library/Application Support/com.pis.report.kiosk/config/`
 
-首次运行若不存在配置文件，会以 `resources/config/app-config.json` 为模板初始化（开发模式回退到工程根 `resources/`）。
+首次运行优先迁移安装目录 `config/app-config.json`，其次迁移旧数据目录根部的 `app-config.json`；均不存在时使用安装目录 `config/app-config.example.json` 初始化。新配置已存在时不再导入旧文件，也不受模板更新影响。开发构建使用独立的 `debug-config` 目录，仅首次初始化读取开发模板。
+
+### 手工编辑配置
+
+设置页显示实际配置文件的完整路径，并提供“打开配置目录”按钮。安装包与 ZIP 的程序目录也提供 `打开配置目录.cmd`，以当前 Windows 账号打开同一个目录；软件运行时也可使用该入口。入口只打开目录，不启动终端业务或初始化配置，首次安装请先正常启动软件。
+
+先打开目录，再退出终端，编辑真实 `app-config.json`，保存后重新启动。避免软件运行期间手工修改后又在设置页保存，覆盖外部修改。安装目录 `config/config-location.txt` 也说明文件用途：示例模板仅供初始化、迁移归档只供回退，均不是当前运行配置。入口使用 EXE 的 `--open-config-dir` 参数；macOS 开发构建会打开隔离的开发配置目录。
+
+### 升级与恢复
+
+- 使用同一个 Windows 终端账号运行新旧版本（配置及回写队列按账号保存）。等待打印结束，通过应用正常退出后运行新版安装器。安装器检测到终端仍在运行时要求先退出，不强制关闭。
+- 安装包和 ZIP 仅分发 `app-config.example.json`，不会覆盖旧运行配置。ZIP 升级也必须先退出应用，再解压到原目录；不要先卸载旧版。
+- 配置结构由 `configVersion` 管理，目前为 1；缺失字段使用默认值，已有现场值保留。未来结构变化需添加明确的逐版本迁移。损坏配置、类型错误或高于程序支持的版本会阻止启动，Windows 弹窗提示并记录日志，不回退默认值运行。
+- 迁移及每次设置保存前，在新配置同目录的 `config-history` 保存原文件快照；失败则停止写入。新文件校验后使用同目录临时文件同步并原子替换，成功后才更新内存。新配置和备份写入成功后，旧配置改名为 `app-config.migrated.json`，并在旁边生成 `config-migration.txt` 标明真实配置路径；归档已存在或目录无写权限时保留旧文件、记录日志并弹窗提示，不覆盖已有归档。
+- 周期备份仍位于数据目录 `config-backups`，最多 30 份；`config/config-history` 快照不自动清理，由运维按需归档。备份包含现场凭据，应按配置文件相同权限管理。
+- 回写队列仍使用数据目录中的 `print-jobs.jsonl`，升级不移动或清空它。
+- 恢复时先退出程序，保留故障配置，将需要的历史快照复制回 `config/app-config.json`。回退旧程序必须配套兼容的配置；切回使用安装目录配置的旧版时，应恢复到旧版路径。此版本不提供自动程序回滚。
+- 卸载新版保留数据目录；旧版安装器可能删除它原先安装的配置，因此首次迁移前应覆盖升级并另行备份，避免先卸载。
+
 
 可配置项：
 
