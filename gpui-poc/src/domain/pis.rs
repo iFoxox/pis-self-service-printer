@@ -158,6 +158,11 @@ pub(crate) async fn post_with_delivery<T: DeserializeOwned + Default>(
     let timeout_secs = u64::from(config.service.request_timeout_seconds.min(5));
     let client = http_client(timeout_secs)?;
 
+    log::info(
+        "pis-api",
+        &format!("POST {url} 请求入参: {}", Value::Object(map.clone())),
+    );
+
     let response = client
         .post(url)
         .header("Content-Type", "application/json")
@@ -166,7 +171,7 @@ pub(crate) async fn post_with_delivery<T: DeserializeOwned + Default>(
         .send()
         .await
         .map_err(|e| {
-            log::error("pis-api", &format!("接口请求失败: {e}"));
+            log::error("pis-api", &format!("{pathname} 接口请求失败: {e}"));
             let safe_to_retry = e.is_connect();
             let message = if e.is_timeout() {
                 "接口请求超时，请联系工作人员！".to_string()
@@ -182,10 +187,20 @@ pub(crate) async fn post_with_delivery<T: DeserializeOwned + Default>(
         })?;
 
     let status = response.status();
-    let text = response.text().await.map_err(|e| RequestFailure {
-        message: format!("读取接口响应失败：{e}"),
-        safe_to_retry: false,
+    let text = response.text().await.map_err(|e| {
+        log::error(
+            "pis-api",
+            &format!("{pathname} HTTP {} 读取接口响应失败: {e}", status.as_u16()),
+        );
+        RequestFailure {
+            message: format!("读取接口响应失败：{e}"),
+            safe_to_retry: false,
+        }
     })?;
+    log::info(
+        "pis-api",
+        &format!("{pathname} HTTP {} 响应: {text}", status.as_u16()),
+    );
     let payload: Result<PisResponse<T>, _> = serde_json::from_str(&text);
 
     if !status.is_success() {
