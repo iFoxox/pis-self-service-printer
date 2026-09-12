@@ -44,14 +44,14 @@ fn estimated_text_width(text: &str, size: f32) -> f32 {
         .sum()
 }
 
-/// 收费项目列内容宽度（设计稿像素），与固定列 / 页面留白保持同一套公式
+/// 检查项目列内容宽度（设计稿像素），与固定列 / 页面留白保持同一套公式
 fn exam_column_width() -> f32 {
     let (viewport_width, _) = theme::viewport_logical();
     let design_width = viewport_width / theme::ui_scale();
     (design_width - 96. * 2. - 2. * 2. - 2. * 2. - 4. - 64. - 130.) / 5.
 }
 
-/// 超长收费项目横向循环滚动；普通长度保持居中
+/// 超长检查项目横向循环滚动；普通长度保持居中
 fn exam_item_cell(text: String, index: usize) -> gpui::AnyElement {
     let text_size = 20.;
     let column_width = exam_column_width().max(120.);
@@ -423,7 +423,7 @@ impl KioskState {
             "患者姓名",
             "病理号",
             "报告类型",
-            "收费项目",
+            "检查项目",
             "签发时间",
             "打印状态",
         ];
@@ -588,7 +588,14 @@ impl KioskState {
                             .text_size(ts(16.))
                             .font_weight(FontWeight::EXTRA_BOLD)
                             .text_color(c(theme::INK))
-                            .child(if printed { "已打印" } else { "可打印" }),
+                            .text_center()
+                            .child(if printed && disabled {
+                                "已打印，补打请到人工窗口"
+                            } else if printed {
+                                "已打印"
+                            } else {
+                                "可打印"
+                            }),
                     )
                     .child(
                         div()

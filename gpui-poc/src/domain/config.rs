@@ -83,7 +83,7 @@ impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
             fullscreen: true,
-            idle_timeout_seconds: 60,
+            idle_timeout_seconds: 120,
             exit_password: "1200".into(),
             minimize_password: "9900".into(),
             log_password: "1600".into(),
@@ -411,7 +411,7 @@ mod upgrade_tests {
         assert_eq!(store.get().hospital_name, "Site");
         assert_eq!(store.get().service.api_key, "site-key");
         assert_eq!(store.get().print.default_printer, "Printer");
-        assert_eq!(store.get().terminal.idle_timeout_seconds, 60);
+        assert_eq!(store.get().terminal.idle_timeout_seconds, 120);
         assert_eq!(std::fs::read(path).unwrap(), original);
     }
 

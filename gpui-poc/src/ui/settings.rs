@@ -22,6 +22,10 @@ use crate::widgets;
 const VOICE_EXT: &[&str] = &["mp3", "wav", "ogg", "m4a", "aac"];
 const LOGO_EXT: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp"];
 
+const FORM_COLUMN_GAP: f32 = 40.;
+const FORM_ROW_GAP: f32 = 20.;
+const FORM_SIDE_PADDING: f32 = 40.;
+
 impl KioskState {
     /// 分区标题（对应 .settings-section-title）
     fn section_title(title: &str, subtitle: &str) -> gpui::AnyElement {
@@ -194,8 +198,8 @@ impl KioskState {
         let info_grid = div()
             .grid()
             .grid_cols(2)
-            .gap_x(s(24.))
-            .gap_y(s(14.))
+            .gap_x(s(FORM_COLUMN_GAP))
+            .gap_y(s(FORM_ROW_GAP))
             .child(self.text_field("hospital_name"))
             .child(self.text_field("terminal_code"))
             .child(self.render_logo_row(
@@ -217,8 +221,8 @@ impl KioskState {
         let pis_grid = div()
             .grid()
             .grid_cols(2)
-            .gap_x(s(24.))
-            .gap_y(s(14.))
+            .gap_x(s(FORM_COLUMN_GAP))
+            .gap_y(s(FORM_ROW_GAP))
             .child(self.text_field_wide("base_url"))
             .child(self.text_field("org_id"))
             .child(self.slider_row(
@@ -233,8 +237,8 @@ impl KioskState {
         let print_grid = div()
             .grid()
             .grid_cols(2)
-            .gap_x(s(24.))
-            .gap_y(s(14.))
+            .gap_x(s(FORM_COLUMN_GAP))
+            .gap_y(s(FORM_ROW_GAP))
             .child(self.render_printer_row(cx))
             .child(
                 div()
@@ -297,8 +301,8 @@ impl KioskState {
         let audio_grid = div()
             .grid()
             .grid_cols(2)
-            .gap_x(s(24.))
-            .gap_y(s(14.))
+            .gap_x(s(FORM_COLUMN_GAP))
+            .gap_y(s(FORM_ROW_GAP))
             .child(self.toggle_row(
                 cx,
                 "voice_enabled",
@@ -369,8 +373,8 @@ impl KioskState {
         let security_grid = div()
             .grid()
             .grid_cols(2)
-            .gap_x(s(24.))
-            .gap_y(s(14.))
+            .gap_x(s(FORM_COLUMN_GAP))
+            .gap_y(s(FORM_ROW_GAP))
             .child(self.toggle_row(
                 cx,
                 "fullscreen",
@@ -442,7 +446,7 @@ impl KioskState {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .px(s(28.))
+                            .px(s(FORM_SIDE_PADDING))
                             .py(s(16.))
                             .border_b_1()
                             .border_color(c(theme::LINE))
@@ -467,7 +471,7 @@ impl KioskState {
                             .min_h_0()
                             // 框架滚动条：滚轮 + 可拖动拇指，常显（kiosk 触屏）
                             .overflow_y_scrollbar()
-                            .px(s(28.))
+                            .px(s(FORM_SIDE_PADDING))
                             .py(s(12.))
                             .child(Self::section_title("终端信息", "用于页面展示和设备识别"))
                             .child(info_grid)
@@ -499,7 +503,7 @@ impl KioskState {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .px(s(28.))
+                            .px(s(FORM_SIDE_PADDING))
                             .py(s(14.))
                             .border_t_1()
                             .border_color(c(theme::LINE))
@@ -683,16 +687,22 @@ impl KioskState {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(match self.printer_select.clone() {
-                        Some(select) => Select::new(&select)
-                            .cleanable(true)
-                            .placeholder("请选择报告打印机")
-                            .w_full()
-                            .into_any_element(),
-                        None => div().into_any_element(),
-                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(match self.printer_select.clone() {
+                                Some(select) => Select::new(&select)
+                                    .cleanable(true)
+                                    .placeholder("请选择报告打印机")
+                                    .w_full()
+                                    .into_any_element(),
+                                None => div().into_any_element(),
+                            }),
+                    )
                     .child(
                         Button::new("refresh-printers")
+                            .flex_none()
                             .small()
                             .outline()
                             .label(if loading { "刷新中..." } else { "刷新打印机" })

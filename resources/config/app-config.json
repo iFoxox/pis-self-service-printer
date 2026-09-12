@@ -21,7 +21,7 @@
   },
   "terminal": {
     "fullscreen": true,
-    "idleTimeoutSeconds": 60,
+    "idleTimeoutSeconds": 120,
     "exitPassword": "",
     "minimizePassword": "",
     "logPassword": "",

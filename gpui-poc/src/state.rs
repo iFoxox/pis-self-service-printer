@@ -555,9 +555,9 @@ impl KioskState {
                     Ok(list) => {
                         state.set_reports(list);
                         state.page = Page::Reports;
-                        // 进入报告页：空闲倒计时重新开始；空态页固定 10 秒自动返回
+                        // 进入报告页：空闲倒计时重新开始；空态页固定 20 秒自动返回
                         if state.reports.is_empty() {
-                            state.countdown = 10;
+                            state.countdown = 20;
                         } else {
                             state.reset_countdown();
                         }
@@ -1375,10 +1375,9 @@ impl KioskState {
                             state.countdown = state.countdown.saturating_sub(1);
                             if state.countdown == 0 {
                                 if state.page == Page::Reports {
-                                    // 报告页超时返回查询页（保留查询信息，方便重查），
-                                    // 不直接回首页；查询页超时仍回首页
+                                    // 报告页超时返回查询页并清空患者信息；查询页超时仍回首页。
+                                    state.go_home();
                                     state.page = Page::Search;
-                                    state.reset_countdown();
                                 } else {
                                     state.go_home();
                                 }
