@@ -924,6 +924,10 @@ impl KioskState {
         self.page = Page::Settings;
         self.reset_countdown();
 
+        self.rebuild_settings_controls(window, cx);
+    }
+
+    fn rebuild_settings_controls(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         // 文本字段：Input 实体（密码字段掩码），输入实时同步回 draft.config
         let mut inputs = std::collections::HashMap::new();
         for key in TEXT_FIELDS {
@@ -1128,6 +1132,57 @@ impl KioskState {
 
         self.refresh_printers(cx);
         cx.notify();
+    }
+
+    pub fn import_settings_file(&mut self, cx: &mut gpui::Context<Self>) {
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("选择要导入的 app-config.json 配置文件".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let path = match receiver.await {
+                Ok(Ok(Some(paths))) => match paths.into_iter().next() {
+                    Some(path) => path,
+                    None => return,
+                },
+                Ok(Ok(None)) => return,
+                _ => {
+                    let _ = this.update(cx, |state, cx| state.show_error(cx, "无法打开配置文件选择窗口"));
+                    return;
+                }
+            };
+            let content = cx.background_executor().spawn(async move {
+                if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")) {
+                    return Err("请选择 JSON 配置文件".to_string());
+                }
+                std::fs::read_to_string(path).map_err(|_| "无法读取配置文件，请检查文件权限及 UTF-8 编码".to_string())
+            }).await;
+            let _ = this.update(cx, |state, cx| {
+                if state.page != Page::Settings { return; }
+                let result = content.and_then(|text| crate::domain::config::import_config(&state.draft.config, &text));
+                match result {
+                    Ok(config) => {
+                        if let Some(handle) = state.window_handle {
+                            cx.spawn(async move |kiosk, cx| {
+                                let _ = handle.update(cx, |_, window, cx| {
+                                    let _ = kiosk.update(cx, |state, cx| {
+                                        if state.page != Page::Settings { return; }
+                                        state.draft.config = config;
+                                        state.rebuild_settings_controls(window, cx);
+                                        state.save_notice = Some("配置已导入，请核对后点击保存配置".into());
+                                        cx.notify();
+                                    });
+                                });
+                            }).detach();
+                        }
+                    }
+                    Err(error) => state.show_error(cx, format!("导入失败：{error}")),
+                }
+                cx.notify();
+            });
+        }).detach();
     }
 
     /// 把滑动条数值写回草稿配置（按字段键名分发，档位与旧版一致）

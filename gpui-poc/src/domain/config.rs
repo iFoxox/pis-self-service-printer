@@ -167,6 +167,107 @@ fn merge_json(defaults: &Value, overlay: &Value) -> Value {
     }
 }
 
+/// 导入只覆盖同路径的已知字段；空字符串、空白和 null 保留当前值。
+/// false 和 0 是有效值。先完成整份校验，调用方再替换草稿。
+pub fn import_config(current: &AppConfig, source: &str) -> Result<AppConfig, String> {
+    let imported: Value = serde_json::from_str(source.trim_start_matches('\u{feff}'))
+        .map_err(|e| format!("配置文件不是有效 JSON（第 {} 行，第 {} 列）", e.line(), e.column()))?;
+    if !imported.is_object() {
+        return Err("配置文件顶层必须是 JSON 对象".into());
+    }
+    fn merge(current: &mut Value, incoming: &Value, path: &str) -> Result<(), String> {
+        if incoming.is_null() || incoming.as_str().is_some_and(|s| s.trim().is_empty()) {
+            return Ok(());
+        }
+        if let (Some(base), Some(extra)) = (current.as_object_mut(), incoming.as_object()) {
+            for (key, value) in extra {
+                if let Some(old) = base.get_mut(key) {
+                    let field = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
+                    merge(old, value, &field)?;
+                }
+            }
+            return Ok(());
+        }
+        let compatible = match (&*current, incoming) {
+            (Value::String(_), Value::String(_)) | (Value::Bool(_), Value::Bool(_)) => true,
+            (Value::Number(old), Value::Number(new)) => {
+                if old.is_u64() { new.as_u64().is_some_and(|n| n <= u32::MAX as u64) }
+                else { new.as_f64().is_some() }
+            }
+            _ => false,
+        };
+        if !compatible { return Err(format!("配置项 {path} 的值类型不正确")); }
+        *current = incoming.clone();
+        Ok(())
+    }
+    let mut merged = serde_json::to_value(current).map_err(|_| "无法读取当前配置".to_string())?;
+    merge(&mut merged, &imported, "")?;
+    let mut config: AppConfig = serde_json::from_value(merged)
+        .map_err(|_| "导入配置的字段类型不正确".to_string())?;
+    if config.config_version != CURRENT_CONFIG_VERSION {
+        return Err(format!("不支持配置版本 {}", config.config_version));
+    }
+    config.applied_template_version = current.applied_template_version.clone();
+    Ok(config)
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    #[test]
+    fn merges_known_paths_without_replacing_missing_or_empty_values() {
+        let mut current = AppConfig::default();
+        current.service.api_key = "existing-key".into();
+        let result = import_config(&current, r#"{
+            "hospitalName":"新医院", "unknown":"ignored",
+            "service":{"orgId":"new-org","apiKey":"  ","baseUrl":null},
+            "terminal":{"inputHint":"","unknown":123}
+        }"#).unwrap();
+        assert_eq!(result.hospital_name, "新医院");
+        assert_eq!(result.service.org_id, "new-org");
+        assert_eq!(result.service.api_key, "existing-key");
+        assert_eq!(result.service.base_url, current.service.base_url);
+        assert_eq!(result.terminal, current.terminal);
+        assert_eq!(result.print, current.print);
+    }
+
+    #[test]
+    fn imports_false_and_zero_and_preserves_empty_sections() {
+        let result = import_config(&AppConfig::default(), r#"{
+            "terminal":{"voiceEnabled":false,"voiceVolume":0},"service":{},"print":null
+        }"#).unwrap();
+        assert!(!result.terminal.voice_enabled);
+        assert_eq!(result.terminal.voice_volume, 0);
+        assert_eq!(result.service, ServiceConfig::default());
+        assert_eq!(result.print, PrintConfig::default());
+    }
+
+    #[test]
+    fn invalid_import_is_atomic_and_does_not_expose_values() {
+        let current = AppConfig::default();
+        for source in [
+            "[]", "{broken", r#"{"service":[]}"#,
+            r#"{"terminal":{"voiceEnabled":"secret-value"}}"#,
+            r#"{"hospitalName":"changed","terminal":{"idleTimeoutSeconds":-1}}"#,
+            r#"{"terminal":{"voiceVolume":4294967296}}"#,
+            r#"{"configVersion":999}"#,
+        ] {
+            let error = import_config(&current, source).unwrap_err();
+            assert!(!error.contains("secret-value"));
+            assert_eq!(current, AppConfig::default());
+        }
+    }
+
+    #[test]
+    fn supports_utf8_bom_and_full_config_round_trip() {
+        let current = AppConfig::default();
+        let source = format!("\u{feff}{}", serde_json::to_string(&current).unwrap());
+        assert_eq!(import_config(&current, &source).unwrap(), current);
+        assert_eq!(import_config(&current, "{}").unwrap(), current);
+    }
+}
+
 // ==== ConfigStore ====
 
 /// 配置存储：内部持锁，支持读写文件

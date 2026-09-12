@@ -415,7 +415,7 @@ impl KioskState {
             .px(s(64.))
             .py(s(20.))
             // 保存成功提示（2 秒自动消失）
-            .children(self.save_notice.as_ref().map(|_msg| {
+            .children(self.save_notice.as_ref().map(|msg| {
                 div()
                     .flex_none()
                     .flex()
@@ -432,7 +432,7 @@ impl KioskState {
                     .text_size(ts(15.))
                     .font_weight(FontWeight::BOLD)
                     .text_color(c(0x2E7D4F))
-                    .child("✓ 配置已保存")
+                    .child(format!("✓ {msg}"))
             }))
             .child(
                 widgets::card()
@@ -458,10 +458,13 @@ impl KioskState {
                                     .child("终端设置"),
                             )
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(c(theme::MUTED))
-                                    .child("点击文本框后用键盘输入，滚动条可拖动"),
+                                Button::new("import-config")
+                                    .outline()
+                                    .label("导入配置文件")
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.play_click(cx);
+                                        this.import_settings_file(cx);
+                                    })),
                             ),
                     )
                     .child(
