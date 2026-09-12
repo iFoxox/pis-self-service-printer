@@ -1,4 +1,5 @@
-//! Windows 打印：Windows.Data.Pdf 优先，PDFium 兜底，最后经 Win32 打印 API 输出
+//! Windows 打印：Windows.Data.Pdf 优先，PDFium 兜底，最后经 Win32 打印 API 输出。
+//! 打印前预检打印机致命状态，失败后复查状态补充精确原因
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -56,7 +57,8 @@ struct PageBitmap {
     pixels: Vec<u8>,
 }
 
-/// 打印 PDF：优先使用系统组件，系统组件失败时使用 PDFium 兜底
+/// 打印 PDF：优先使用系统组件，系统组件失败时使用 PDFium 兜底。
+/// 打印前预检致命状态（缺纸/脱机等），失败后复查状态补充精确原因
 pub fn print_pdf(
     file_path: &str,
     printer: Option<&str>,
@@ -71,10 +73,20 @@ pub fn print_pdf(
         return Err("未检测到可用打印机，请联系工作人员".into());
     }
 
+    // 打印前预检：驱动已上报致命状态时直接给出明确原因，
+    // 而不是等假脱机失败后才报笼统错误
+    if let Some(reason) = super::printer::printer_fatal_status(&printer_name) {
+        super::log::warn(
+            "printer-win",
+            &format!("打印前预检不通过（{printer_name}）：{reason}"),
+        );
+        return Err(format!("打印机{reason}，暂时无法打印，请联系工作人员处理"));
+    }
+
     let bytes = std::fs::read(file_path).map_err(|e| format!("读取 PDF 文件失败: {e}"))?;
 
-    match print_with_windows_data(&bytes, &printer_name, paper, orientation) {
-        Ok(job_id) => Ok(Some(job_id)),
+    let result = match print_with_windows_data(&bytes, &printer_name, paper, orientation) {
+        Ok(job_id) => Ok(job_id),
         Err(e) if e.contains(PRINT_UNCERTAIN_ERR) || e == PRINT_CANCELLED_ERR => Err(e),
         Err(primary_error) => {
             super::log::warn(
@@ -82,9 +94,30 @@ pub fn print_pdf(
                 &format!("系统渲染初始化失败，使用 PDFium：{primary_error}"),
             );
             print_with_pdfium(file_path, &printer_name, paper, orientation)
-                .map(Some)
                 .map_err(|e| format!("系统渲染失败: {primary_error}；PDFium 失败: {e}"))
         }
+    };
+
+    match result {
+        Ok(job_id) => Ok(Some(job_id)),
+        Err(e) if e == PRINT_CANCELLED_ERR => Err(e),
+        Err(e) => Err(enrich_with_printer_status(&printer_name, e)),
+    }
+}
+
+/// 打印失败后复查打印机状态：作业失败时驱动刷新出的状态准确率高（缺纸/卡纸等），
+/// 把致命原因追加到错误信息里，便于现场人员直接定位。
+/// 状态正常或查询失败时保持原错误不变
+fn enrich_with_printer_status(printer_name: &str, error: String) -> String {
+    match super::printer::printer_fatal_status(printer_name) {
+        Some(reason) => {
+            super::log::warn(
+                "printer-win",
+                &format!("打印失败后检测到打印机状态（{printer_name}）：{reason}"),
+            );
+            format!("{error}（打印机状态：{reason}）")
+        }
+        None => error,
     }
 }
 

@@ -2,12 +2,24 @@
 //!
 //! Windows 平台走 winspool 原生 API（EnumPrintersW / GetDefaultPrinterW）；
 //! lpstat / lp 仅用于 macOS/Linux。
+//! 另提供打印机实时状态诊断（缺纸/卡纸/脱机等），供打印前预检与失败后定位。
 
 // Windows 下 lpstat / lp 调用被条件编译排除
 #[cfg(not(target_os = "windows"))]
 use std::process::Command;
 
 use serde::Serialize;
+
+#[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Printing::{
+    PRINTER_ATTRIBUTE_WORK_OFFLINE, PRINTER_STATUS_BUSY, PRINTER_STATUS_DOOR_OPEN,
+    PRINTER_STATUS_ERROR, PRINTER_STATUS_INITIALIZING, PRINTER_STATUS_MANUAL_FEED,
+    PRINTER_STATUS_NOT_AVAILABLE, PRINTER_STATUS_NO_TONER, PRINTER_STATUS_OFFLINE,
+    PRINTER_STATUS_OUTPUT_BIN_FULL, PRINTER_STATUS_PAPER_JAM, PRINTER_STATUS_PAPER_OUT,
+    PRINTER_STATUS_PAPER_PROBLEM, PRINTER_STATUS_PAUSED, PRINTER_STATUS_POWER_SAVE,
+    PRINTER_STATUS_PRINTING, PRINTER_STATUS_PROCESSING, PRINTER_STATUS_TONER_LOW,
+    PRINTER_STATUS_USER_INTERVENTION, PRINTER_STATUS_WAITING, PRINTER_STATUS_WARMING_UP,
+};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -202,8 +214,7 @@ mod tests {
 fn list_printers_windows() -> Result<Vec<PrinterInfo>, String> {
     use windows::Win32::Graphics::Printing::{
         EnumPrintersW, PRINTER_ATTRIBUTE_DEFAULT, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL,
-        PRINTER_INFO_2W, PRINTER_STATUS_ERROR, PRINTER_STATUS_NOT_AVAILABLE, PRINTER_STATUS_OFFLINE,
-        PRINTER_STATUS_PRINTING,
+        PRINTER_INFO_2W,
     };
 
     // 原生 winspool 枚举（毫秒级）：旧实现走 PowerShell + N+1 CIM 查询需 1~3 秒
@@ -236,19 +247,12 @@ fn list_printers_windows() -> Result<Vec<PrinterInfo>, String> {
                 continue;
             }
             let is_default = (info.Attributes & PRINTER_ATTRIBUTE_DEFAULT) != 0;
+            let work_offline = (info.Attributes & PRINTER_ATTRIBUTE_WORK_OFFLINE) != 0;
             printers.push(PrinterInfo {
                 name: name.clone(),
                 display_name: name,
                 is_default,
-                status: describe_status(
-                    info.Status,
-                    &[
-                        (PRINTER_STATUS_PRINTING, "打印中"),
-                        (PRINTER_STATUS_OFFLINE, "脱机"),
-                        (PRINTER_STATUS_ERROR, "错误"),
-                        (PRINTER_STATUS_NOT_AVAILABLE, "不可用"),
-                    ],
-                ),
+                status: describe_status(info.Status, work_offline),
             });
         }
         Ok(printers)
@@ -267,15 +271,100 @@ fn wide_string(ptr: windows::core::PWSTR) -> String {
     }
 }
 
-/// 把 winspool 状态标志位翻译为简短中文（置位的第一个命中项，无标志 = 就绪）
+/// 致命状态标志位：命中任意一个都无法正常接单。按优先级排列，
+/// 先具体（缺纸/卡纸）后通用（故障），多位置位时取第一个命中
 #[cfg(target_os = "windows")]
-fn describe_status(status: u32, mapping: &[(u32, &'static str)]) -> String {
-    for (flag, label) in mapping {
-        if status & *flag != 0 {
-            return label.to_string();
-        }
+const FATAL_STATUS_FLAGS: &[(u32, &str)] = &[
+    (PRINTER_STATUS_PAPER_JAM, "卡纸"),
+    (PRINTER_STATUS_PAPER_OUT, "缺纸"),
+    (PRINTER_STATUS_PAPER_PROBLEM, "纸张异常"),
+    (PRINTER_STATUS_OUTPUT_BIN_FULL, "出纸口已满"),
+    (PRINTER_STATUS_DOOR_OPEN, "盖板未关闭"),
+    (PRINTER_STATUS_NO_TONER, "墨粉已用尽"),
+    (PRINTER_STATUS_MANUAL_FEED, "等待手动进纸"),
+    (PRINTER_STATUS_USER_INTERVENTION, "需要人工干预"),
+    (PRINTER_STATUS_OFFLINE, "脱机"),
+    (PRINTER_STATUS_NOT_AVAILABLE, "不可用"),
+    (PRINTER_STATUS_PAUSED, "已暂停"),
+    (PRINTER_STATUS_ERROR, "故障"),
+];
+
+/// 信息性状态标志位：不阻断打印，仅用于设置页展示
+#[cfg(target_os = "windows")]
+const INFO_STATUS_FLAGS: &[(u32, &str)] = &[
+    (PRINTER_STATUS_PRINTING, "打印中"),
+    (PRINTER_STATUS_PROCESSING, "处理中"),
+    (PRINTER_STATUS_WARMING_UP, "预热中"),
+    (PRINTER_STATUS_INITIALIZING, "初始化中"),
+    (PRINTER_STATUS_TONER_LOW, "墨粉不足"),
+    (PRINTER_STATUS_BUSY, "忙碌"),
+    (PRINTER_STATUS_WAITING, "等待中"),
+    (PRINTER_STATUS_POWER_SAVE, "省电模式"),
+];
+
+/// 把 winspool 状态标志位翻译为简短中文；「脱机使用打印机」属性（WORK_OFFLINE）
+/// 优先于状态位。无任何命中 = 就绪
+#[cfg(target_os = "windows")]
+fn describe_status(status: u32, work_offline: bool) -> String {
+    let label = if work_offline {
+        Some("脱机")
+    } else {
+        FATAL_STATUS_FLAGS
+            .iter()
+            .chain(INFO_STATUS_FLAGS.iter())
+            .find(|(flag, _)| status & flag != 0)
+            .map(|(_, label)| *label)
+    };
+    label.unwrap_or("就绪").to_string()
+}
+
+/// 查询打印机实时状态，判断是否无法接单（缺纸、卡纸、脱机等致命状态）。
+/// 返回 `Some(中文原因)` 表示驱动已上报致命状态；`None` 表示状态正常或查询失败。
+///
+/// 查询失败刻意放行（fail-open）：预检只是尽力而为，不因预检本身故障阻断打印，
+/// 真正的故障由实际打印流程报错。
+///
+/// 注意：winspool 状态由驱动上报，部分驱动仅在队列有作业时才刷新，
+/// 空闲时缺纸可能仍显示就绪——打印失败后的复查才是准确率最高的诊断时机。
+#[cfg(target_os = "windows")]
+pub fn printer_fatal_status(printer: &str) -> Option<String> {
+    use windows::Win32::Graphics::Printing::{
+        ClosePrinter, GetPrinterW, OpenPrinterW, PRINTER_HANDLE, PRINTER_INFO_2W,
+    };
+    use windows::core::PCWSTR;
+
+    let name = printer.trim();
+    if name.is_empty() {
+        return None;
     }
-    "就绪".to_string()
+    let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let mut handle = PRINTER_HANDLE::default();
+        if OpenPrinterW(PCWSTR(name_wide.as_ptr()), &mut handle, None).is_err() {
+            return None;
+        }
+        let fatal = (|| {
+            let mut needed = 0u32;
+            // 第一次调用仅探测缓冲区大小（必然"失败"并回填 needed）
+            let _ = GetPrinterW(handle, 2, None, &mut needed);
+            if needed == 0 {
+                return None;
+            }
+            let mut buffer = vec![0u8; needed as usize];
+            GetPrinterW(handle, 2, Some(&mut buffer), &mut needed).ok()?;
+            let info = &*(buffer.as_ptr() as *const PRINTER_INFO_2W);
+            if info.Attributes & PRINTER_ATTRIBUTE_WORK_OFFLINE != 0 {
+                return Some("脱机".to_string());
+            }
+            FATAL_STATUS_FLAGS
+                .iter()
+                .find(|(flag, _)| info.Status & flag != 0)
+                .map(|(_, label)| label.to_string())
+        })();
+        let _ = ClosePrinter(handle);
+        fatal
+    }
 }
 
 /// 系统默认打印机名（失败或不存在时返回空字符串）
@@ -349,6 +438,37 @@ mod windows_tests {
             printers.iter().any(|p| p.name == default),
             "枚举结果应包含默认打印机 {default}"
         );
+    }
+
+    /// 状态分类：致命位优先于信息位，映射顺序即优先级（具体状态先于通用「故障」）
+    #[test]
+    fn classifies_status_flags() {
+        assert_eq!(describe_status(0, false), "就绪");
+        assert_eq!(describe_status(PRINTER_STATUS_PRINTING, false), "打印中");
+        assert_eq!(describe_status(PRINTER_STATUS_PAPER_OUT, false), "缺纸");
+        assert_eq!(describe_status(PRINTER_STATUS_PAPER_JAM, false), "卡纸");
+        assert_eq!(
+            describe_status(PRINTER_STATUS_PAPER_OUT | PRINTER_STATUS_ERROR, false),
+            "缺纸"
+        );
+        // 「脱机使用打印机」属性独立于状态位
+        assert_eq!(describe_status(0, true), "脱机");
+    }
+
+    /// 预检 fail-open：查询不存在的打印机或空名称返回 None，不阻断打印
+    #[test]
+    fn fatal_status_fails_open_for_unknown_printer() {
+        assert!(printer_fatal_status("__no_such_printer__").is_none());
+        assert!(printer_fatal_status("   ").is_none());
+    }
+
+    /// 预检真实打印机：本机必有 Microsoft Print to PDF，正常情况下不报致命状态
+    #[test]
+    fn fatal_status_queries_real_printer() {
+        let printers = list_printers().expect("枚举打印机失败");
+        let target = printers.iter().find(|p| p.is_default).unwrap_or(&printers[0]);
+        // 不断言具体结果（状态取决于设备），只验证查询本身不出错
+        let _ = printer_fatal_status(&target.name);
     }
 }
 
