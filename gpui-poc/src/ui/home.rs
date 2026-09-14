@@ -199,7 +199,7 @@ impl KioskState {
             )
             .child(
                 div().mt(s(34.)).w_full().flex().justify_center().child(
-                    widgets::fw_primary("start-print", "开始打印")
+                    widgets::fw_primary_sized("start-print", "开始打印", 36.)
                         .child(icons::icon(icons::ARROW_RIGHT, 32., 0xFFFFFF))
                         .rounded_tl(s(22.))
                         .rounded_tr(s(22.))
@@ -207,7 +207,7 @@ impl KioskState {
                         .rounded_bl(s(8.))
                         .min_h(s(88.))
                         .min_w(s(560.))
-                        .text_size(ts(32.))
+                        .text_size(ts(36.))
                         .shadow_lg()
                         .on_click(cx.listener(|this, _event, _window, cx| {
                             this.play_click(cx);

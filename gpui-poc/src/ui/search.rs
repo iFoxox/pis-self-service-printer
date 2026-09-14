@@ -457,12 +457,14 @@ impl KioskState {
             .child(keypad)
             .child(if loading {
                 widgets::disabled(true, query_label)
+                    .text_size(ts(36.))
+                    .font_weight(FontWeight::EXTRA_BOLD)
                     .min_h(s(84.))
                     .w_full()
                     .into_any_element()
             } else {
                 let pressed = self.pressed_action.as_deref() == Some("submit-query");
-                let btn = widgets::fw_primary("submit-query", query_label)
+                let btn = widgets::fw_primary_sized("submit-query", query_label, 36.)
                     .min_h(s(84.))
                     .w_full();
                 let btn = if pressed {

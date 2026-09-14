@@ -588,9 +588,13 @@ use gpui_component::button::ButtonVariants as _;
 use gpui_component::Disableable as _;
 
 pub fn fw_primary(id: &'static str, label: &'static str) -> gpui_component::button::Button {
+    fw_primary_sized(id, label, 32.)
+}
+
+pub fn fw_primary_sized(id: &'static str, label: &'static str, size: f32) -> gpui_component::button::Button {
     gpui_component::button::Button::new(id)
         .primary()
-        .child(kiosk_label(label, 32.))
+        .child(kiosk_label(label, size).font_weight(FontWeight::EXTRA_BOLD))
         .rounded(s(18.))
         .min_h(s(60.))
         .min_w(s(200.))
@@ -600,7 +604,7 @@ pub fn fw_primary(id: &'static str, label: &'static str) -> gpui_component::butt
             linear_color_stop(c(theme::BUTTON_TOP), 0.),
             linear_color_stop(c(theme::BUTTON_BOTTOM), 1.),
         ))
-        .text_size(theme::ts(32.))
+        .text_size(theme::ts(size))
         .shadow_md()
 }
 
@@ -609,7 +613,7 @@ pub fn fw_mint(id: &'static str, label: &'static str, icon: Option<&'static str>
     let btn = gpui_component::button::Button::new(id)
         .outline()
         .children(icon.map(|p| crate::icons::icon(p, 34., 0x086B54)))
-        .child(kiosk_label(label, 34.))
+        .child(kiosk_label(label, 38.).font_weight(FontWeight::EXTRA_BOLD))
         .rounded(s(20.))
         .min_h(s(84.))
         .min_w(s(220.))
@@ -621,7 +625,7 @@ pub fn fw_mint(id: &'static str, label: &'static str, icon: Option<&'static str>
             linear_color_stop(c(0xC9EFE1), 1.),
         ))
         .text_color(c(0x086B54))
-        .text_size(theme::ts(34.))
+        .text_size(theme::ts(38.))
         .shadow_sm();
     btn
 }
@@ -631,7 +635,7 @@ pub fn fw_warm(id: &'static str, label: &'static str, icon: Option<&'static str>
     let btn = gpui_component::button::Button::new(id)
         .outline()
         .children(icon.map(|p| crate::icons::icon(p, 34., 0x91560F)))
-        .child(kiosk_label(label, 34.))
+        .child(kiosk_label(label, 38.).font_weight(FontWeight::EXTRA_BOLD))
         .rounded(s(20.))
         .min_h(s(84.))
         .min_w(s(220.))
@@ -643,7 +647,7 @@ pub fn fw_warm(id: &'static str, label: &'static str, icon: Option<&'static str>
             linear_color_stop(c(0xFFE8C9), 1.),
         ))
         .text_color(c(0x91560F))
-        .text_size(theme::ts(34.))
+        .text_size(theme::ts(38.))
         .shadow_sm();
     btn
 }
@@ -652,11 +656,11 @@ pub fn fw_warm(id: &'static str, label: &'static str, icon: Option<&'static str>
 pub fn fw_disabled(id: &'static str, label: &'static str) -> gpui_component::button::Button {
     gpui_component::button::Button::new(id)
         .primary()
-        .child(kiosk_label(label, 28.))
+        .child(kiosk_label(label, 32.).font_weight(FontWeight::EXTRA_BOLD))
         .disabled(true)
         .rounded(s(18.))
         .min_h(s(58.))
         .min_w(s(230.))
         .px(s(32.))
-        .text_size(theme::ts(28.))
+        .text_size(theme::ts(32.))
 }

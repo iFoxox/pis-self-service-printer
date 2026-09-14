@@ -48,12 +48,12 @@ fn estimated_text_width(text: &str, size: f32) -> f32 {
 fn exam_column_width() -> f32 {
     let (viewport_width, _) = theme::viewport_logical();
     let design_width = viewport_width / theme::ui_scale();
-    (design_width - 96. * 2. - 2. * 2. - 2. * 2. - 4. - 64. - 130.) / 5.
+    (design_width - 96. * 2. - 2. * 2. - 2. * 2. - 4. - 80. - 150.) / 5.
 }
 
 /// 超长检查项目横向循环滚动；普通长度保持居中
 fn exam_item_cell(text: String, index: usize) -> gpui::AnyElement {
-    let text_size = 20.;
+    let text_size = 24.;
     let column_width = exam_column_width().max(120.);
     let text_width = estimated_text_width(&text, text_size);
     let separator_width = text_size * 0.58 * 8.;
@@ -86,7 +86,7 @@ fn exam_item_cell(text: String, index: usize) -> gpui::AnyElement {
     let duration = 7.0 + (text.chars().count() as f32 * 0.14).min(9.0);
     base_cell
         .child(
-            div().relative().w_full().h(s(30.)).overflow_hidden().child(
+            div().relative().w_full().h(s(38.)).overflow_hidden().child(
                 div()
                     .absolute()
                     .top(s(4.))
@@ -284,7 +284,7 @@ impl KioskState {
                             } else {
                                 c(0xB9D7F5)
                             })
-                            .child(widgets::checkbox_success(all_selected, 26., false))
+                            .child(widgets::checkbox_success(all_selected, 40., false))
                             .child(
                                 div()
                                     .text_size(ts(19.))
@@ -407,7 +407,7 @@ impl KioskState {
             };
             return widgets::fw_disabled("confirm-print-disabled", label).into_any_element();
         }
-        widgets::fw_primary("confirm-print", "确认打印")
+        widgets::fw_primary_sized("confirm-print", "确认打印", 36.)
             .min_h(s(58.))
             .min_w(s(230.))
             .on_click(cx.listener(|this, _event, _window, cx| {
@@ -444,7 +444,7 @@ impl KioskState {
             .shadow_sm()
             .child(
                 div()
-                    .w(s(64.))
+                    .w(s(80.))
                     .flex_none()
                     .flex()
                     .items_center()
@@ -458,7 +458,7 @@ impl KioskState {
             let is_status = *text == "打印状态";
             let cell = div()
                 .min_w_0()
-                .when_else(is_status, |el| el.flex_none().w(s(130.)), |el| el.flex_1())
+                .when_else(is_status, |el| el.flex_none().w(s(150.)), |el| el.flex_1())
                 .flex()
                 .items_center()
                 .justify_center()
@@ -509,7 +509,7 @@ impl KioskState {
 
         let row = div()
             .flex()
-            .min_h(s(72.))
+            .min_h(s(96.))
             .flex_none()
             .bg(row_bg)
             .on_mouse_down(
@@ -530,15 +530,15 @@ impl KioskState {
             }))
             .child(
                 div()
-                    .w(s(64.))
+                    .w(s(80.))
                     .flex_none()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(widgets::checkbox(is_selected && !disabled, 34., disabled)),
+                    .child(widgets::checkbox_success(is_selected && !disabled, 46., disabled)),
             )
-            .child(self.table_cell(name, 24., FontWeight::EXTRA_BOLD))
-            .child(self.table_cell(pathology_no, 20., FontWeight::BOLD))
+            .child(self.table_cell(name, 28., FontWeight::EXTRA_BOLD))
+            .child(self.table_cell(pathology_no, 24., FontWeight::BOLD))
             .child(
                 div()
                     .flex_1()
@@ -555,8 +555,8 @@ impl KioskState {
                             .py(s(7.))
                             .rounded(s(10.))
                             .bg(c(type_bg))
-                            .text_size(ts(18.))
-                            .line_height(ts(18.))
+                            .text_size(ts(22.))
+                            .line_height(ts(26.))
                             .font_weight(FontWeight::BOLD)
                             .text_color(c(type_fg))
                             .child(type_label),
@@ -565,13 +565,13 @@ impl KioskState {
             .child(exam_item_cell(exam_item, index))
             .child(self.table_cell(
                 format_authorize_at(&report.authorize_at),
-                20.,
+                24.,
                 FontWeight::BOLD,
             ))
             .child(
                 div()
                     .flex_none()
-                    .w(s(130.))
+                    .w(s(150.))
                     .flex()
                     .flex_col()
                     .items_center()
@@ -585,7 +585,7 @@ impl KioskState {
                             .py(s(8.))
                             .rounded(s(10.))
                             .bg(status_bg)
-                            .text_size(ts(16.))
+                            .text_size(ts(20.))
                             .font_weight(FontWeight::EXTRA_BOLD)
                             .text_color(c(theme::INK))
                             .text_center()
@@ -599,7 +599,7 @@ impl KioskState {
                     )
                     .child(
                         div()
-                            .text_size(ts(14.))
+                            .text_size(ts(18.))
                             .font_weight(FontWeight::EXTRA_BOLD)
                             .text_color(c(theme::INK))
                             .child(format!("打印次数 {print_count}")),
